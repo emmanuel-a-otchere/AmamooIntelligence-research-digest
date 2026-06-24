@@ -1,6 +1,6 @@
 # Use Cases
 
-OtchereJarvis is a **general-purpose base**. Specialized variants for specific domains live in **separate repos** that fork from OtchereJarvis. This folder is the starting point for scaffolding those specializations.
+AmamooIntelligence is a **general-purpose base**. Specialized variants for specific domains live in **separate repos** that fork from AmamooIntelligence. This folder is the starting point for scaffolding those specializations.
 
 ## Layout
 
@@ -17,16 +17,18 @@ use-cases/
 
 ## Workflow
 
-1. Fork `emmanuel-a-otchere/OtchereJarvis` to `emmanuel-a-otchere/OtchereJarvis-<usecase>`.
+1. Fork `emmanuel-a-otchere/AmamooIntelligence` to `emmanuel-a-otchere/AmamooIntelligence-<usecase>`.
 2. In the new repo, copy `_template/` → `<your-name>/` and fill it in.
 3. Build your specialization as a focused layer on top of base.
 4. Rebase (or merge) `base/main` weekly to pick up upstream fixes.
-5. Promote generally-useful improvements back to OtchereJarvis via PR.
+5. Promote generally-useful improvements back to AmamooIntelligence via PR.
 
 Full details: [`docs/SPECIALIZING.md`](../docs/SPECIALIZING.md).
 
 ## Active specializations
 
-> None yet. When you create a specialized fork, link it here with a one-line summary.
+| Repo | One-line summary |
+| --- | --- |
+| [`AmamooIntelligence-research-digest`](https://github.com/emmanuel-a-otchere/AmamooIntelligence-research-digest) | Scheduled multi-source research digest: gather → cluster → deep-research → synthesize → optional TTS |
 
-- _add: `OtchereJarvis-<usecase>` — <what it does>_
+When you create a specialized fork, add a row above with a one-line summary.

@@ -22,20 +22,27 @@
 
 ---
 
-## ⚠️ This is a specialization fork
+<div align="center">
 
-**OtchereJarvis** is a fork of [`open-jarvis/OpenJarvis`](https://github.com/open-jarvis/OpenJarvis) maintained by [@emmanuel-a-otchere](https://github.com/emmanuel-a-otchere). It tracks upstream and serves as the **general-purpose base** for specialized forks aimed at specific use cases.
+# AmamooIntelligence
+
+*General-purpose base for specialized OpenJarvis forks.*
+
+A fork of [**OpenJarvis**](https://github.com/open-jarvis/OpenJarvis) maintained by [@emmanuel-a-otchere](https://github.com/emmanuel-a-otchere). Tracks upstream weekly and ships unmodified OpenJarvis releases plus a scaffold for building domain-specific variants on top.
+
+</div>
 
 **Use this repo as:**
 
 - Your starting point if you want a clean, upstream-tracking OpenJarvis you can specialize.
-- The base you fork from when creating a domain-specific variant (e.g., `OtchereJarvis-trading`, `OtchereJarvis-clinical-notes`).
+- The base you fork from when creating a domain-specific variant (e.g., `AmamooIntelligence-trading`, `AmamooIntelligence-clinical-notes`).
 
 **Read first:**
 
 - [`docs/SPECIALIZING.md`](docs/SPECIALIZING.md) — How to create and maintain a specialization fork.
 - [`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md) — How this repo tracks upstream.
 - [`use-cases/`](use-cases/) — Scaffold for new use-case specializations.
+- [`ATTRIBUTION.md`](ATTRIBUTION.md) — Credit and license for the underlying OpenJarvis work.
 
 For the unmodified upstream framework, see [`open-jarvis/OpenJarvis`](https://github.com/open-jarvis/OpenJarvis).
 
