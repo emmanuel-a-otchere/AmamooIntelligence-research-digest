@@ -27,7 +27,7 @@ class TestNVIDIADetection:
     @patch("openjarvis.core.config.shutil.which", return_value="/usr/bin/nvidia-smi")
     @patch(
         "openjarvis.core.config._run_cmd",
-        return_value="NVIDIA A100-SXM4-80GB, 81920, 1",
+        return_value="NVIDIA A100-SXM4-80GB, 81920, 1, 8.0",
     )
     def test_nvidia_smi_parsing(self, mock_run, mock_which):
         gpu = _detect_nvidia_gpu()
@@ -36,15 +36,16 @@ class TestNVIDIADetection:
         assert gpu.vram_gb == 80.0
         assert gpu.count == 1
         assert gpu.vendor == "nvidia"
+        assert gpu.compute_capability == "8.0"
 
     @patch("openjarvis.core.config.shutil.which", return_value="/usr/bin/nvidia-smi")
     @patch(
         "openjarvis.core.config._run_cmd",
         return_value=(
-            "NVIDIA H100 80GB HBM3, 81920, 4\n"
-            "NVIDIA H100 80GB HBM3, 81920, 4\n"
-            "NVIDIA H100 80GB HBM3, 81920, 4\n"
-            "NVIDIA H100 80GB HBM3, 81920, 4"
+            "NVIDIA H100 80GB HBM3, 81920, 4, 9.0\n"
+            "NVIDIA H100 80GB HBM3, 81920, 4, 9.0\n"
+            "NVIDIA H100 80GB HBM3, 81920, 4, 9.0\n"
+            "NVIDIA H100 80GB HBM3, 81920, 4, 9.0"
         ),
     )
     def test_nvidia_smi_multi_gpu(self, mock_run, mock_which):
@@ -67,7 +68,7 @@ class TestNVIDIADetection:
     @patch("openjarvis.core.config.shutil.which", return_value="/usr/bin/nvidia-smi")
     @patch(
         "openjarvis.core.config._run_cmd",
-        return_value="NVIDIA GeForce RTX 4090, 24564, 1",
+        return_value="NVIDIA GeForce RTX 4090, 24564, 1, 8.9",
     )
     def test_vram_detection(self, mock_run, mock_which):
         gpu = _detect_nvidia_gpu()
@@ -78,10 +79,20 @@ class TestNVIDIADetection:
     @patch("openjarvis.core.config.shutil.which", return_value="/usr/bin/nvidia-smi")
     @patch(
         "openjarvis.core.config._run_cmd",
-        return_value="NVIDIA A100-SXM4-80GB, 81920, 1",
+        return_value="NVIDIA A100-SXM4-80GB, 81920, 1, 8.0",
     )
     def test_compute_capability(self, mock_run, mock_which):
-        """compute_capability defaults to empty string when not parsed."""
+        gpu = _detect_nvidia_gpu()
+        assert gpu is not None
+        assert gpu.compute_capability == "8.0"
+
+    @patch("openjarvis.core.config.shutil.which", return_value="/usr/bin/nvidia-smi")
+    @patch(
+        "openjarvis.core.config._run_cmd",
+        return_value="NVIDIA A100-SXM4-80GB, 81920, 1",
+    )
+    def test_compute_capability_backwards_compatible(self, mock_run, mock_which):
+        """Older mocked/driver output without compute_cap still parses."""
         gpu = _detect_nvidia_gpu()
         assert gpu is not None
         assert gpu.compute_capability == ""
@@ -104,7 +115,8 @@ class TestNVIDIAEngineRecommendation:
             gpu=GpuInfo(
                 vendor="nvidia",
                 name="NVIDIA A100-SXM4-80GB",
-                vram_gb=80.0, count=1,
+                vram_gb=80.0,
+                count=1,
             ),
         )
         assert recommend_engine(hw) == "vllm"
@@ -118,7 +130,8 @@ class TestNVIDIAEngineRecommendation:
             gpu=GpuInfo(
                 vendor="nvidia",
                 name="NVIDIA H100 80GB HBM3",
-                vram_gb=80.0, count=1,
+                vram_gb=80.0,
+                count=1,
             ),
         )
         assert recommend_engine(hw) == "vllm"
@@ -132,7 +145,8 @@ class TestNVIDIAEngineRecommendation:
             gpu=GpuInfo(
                 vendor="nvidia",
                 name="NVIDIA Tesla V100-SXM2-32GB",
-                vram_gb=32.0, count=1,
+                vram_gb=32.0,
+                count=1,
             ),
         )
         assert recommend_engine(hw) == "ollama"
@@ -146,7 +160,8 @@ class TestNVIDIAEngineRecommendation:
             gpu=GpuInfo(
                 vendor="nvidia",
                 name="NVIDIA GeForce RTX 4090",
-                vram_gb=24.0, count=1,
+                vram_gb=24.0,
+                count=1,
             ),
         )
         assert recommend_engine(hw) == "ollama"

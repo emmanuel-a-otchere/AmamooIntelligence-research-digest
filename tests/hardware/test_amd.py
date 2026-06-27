@@ -28,9 +28,9 @@ class TestAMDDetection:
     @patch(
         "openjarvis.core.config._run_cmd",
         side_effect=[
-            "AMD Instinct MI300X",        # --showproductname
+            "AMD Instinct MI300X",  # --showproductname
             "GPU[0] : vram Total Memory (B): 206158430208",  # --showmeminfo vram
-            "GPU[0] : Some info",          # --showallinfo
+            "GPU[0] : Some info",  # --showallinfo
         ],
     )
     def test_rocm_smi_parsing(self, mock_run, mock_which):
@@ -48,8 +48,8 @@ class TestAMDDetection:
         "openjarvis.core.config._run_cmd",
         side_effect=[
             "AMD Instinct MI250X\nAMD Instinct MI250X",  # --showproductname
-            "",   # --showmeminfo vram (empty)
-            "",   # --showallinfo (empty)
+            "",  # --showmeminfo vram (empty)
+            "",  # --showallinfo (empty)
         ],
     )
     def test_amd_gpu_model(self, mock_run, mock_which):
@@ -131,7 +131,7 @@ class TestAMDDetection:
 
 
 class TestAMDEngineRecommendation:
-    """Tests that AMD cards map to vllm."""
+    """Tests that AMD datacenter cards map to vllm, consumer cards to lemonade."""
 
     def test_mi300x_recommends_vllm(self):
         hw = HardwareInfo(
@@ -140,13 +140,45 @@ class TestAMDEngineRecommendation:
             cpu_count=96,
             ram_gb=768.0,
             gpu=GpuInfo(
-                vendor="amd", name="AMD Instinct MI300X",
-                vram_gb=192.0, count=1,
+                vendor="amd",
+                name="AMD Instinct MI300X",
+                vram_gb=192.0,
+                count=1,
             ),
         )
         assert recommend_engine(hw) == "vllm"
 
-    def test_amd_generic_recommends_vllm(self):
+    def test_mi350_recommends_vllm(self):
+        hw = HardwareInfo(
+            platform="linux",
+            cpu_brand="AMD EPYC 9654",
+            cpu_count=96,
+            ram_gb=768.0,
+            gpu=GpuInfo(
+                vendor="amd",
+                name="AMD Instinct MI350X",
+                vram_gb=288.0,
+                count=1,
+            ),
+        )
+        assert recommend_engine(hw) == "vllm"
+
+    def test_amd_consumer_recommends_lemonade(self):
+        hw = HardwareInfo(
+            platform="linux",
+            cpu_brand="AMD Ryzen 9 7950X",
+            cpu_count=32,
+            ram_gb=64.0,
+            gpu=GpuInfo(
+                vendor="amd",
+                name="AMD Radeon RX 7900 XTX",
+                vram_gb=24.0,
+                count=1,
+            ),
+        )
+        assert recommend_engine(hw) == "lemonade"
+
+    def test_amd_generic_recommends_lemonade(self):
         hw = HardwareInfo(
             platform="linux",
             cpu_brand="AMD EPYC",
@@ -154,7 +186,7 @@ class TestAMDEngineRecommendation:
             ram_gb=256.0,
             gpu=GpuInfo(vendor="amd", name="AMD GPU", vram_gb=0.0, count=1),
         )
-        assert recommend_engine(hw) == "vllm"
+        assert recommend_engine(hw) == "lemonade"
 
     def test_amd_multi_gpu_recommends_vllm(self):
         hw = HardwareInfo(
@@ -163,8 +195,10 @@ class TestAMDEngineRecommendation:
             cpu_count=128,
             ram_gb=1024.0,
             gpu=GpuInfo(
-                vendor="amd", name="AMD Instinct MI300X",
-                vram_gb=192.0, count=4,
+                vendor="amd",
+                name="AMD Instinct MI300X",
+                vram_gb=192.0,
+                count=4,
             ),
         )
         assert recommend_engine(hw) == "vllm"

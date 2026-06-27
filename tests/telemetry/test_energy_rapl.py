@@ -11,6 +11,10 @@ from openjarvis.telemetry.energy_rapl import (
     RaplEnergyMonitor,
     _discover_domains,
 )
+from tests.telemetry.energy_test_helpers import (
+    assert_close_sets_uninitialized,
+    assert_sample_result_basics,
+)
 
 _PLAT = "openjarvis.telemetry.energy_rapl.platform.system"
 _BASE = "openjarvis.telemetry.energy_rapl._RAPL_BASE"
@@ -33,9 +37,7 @@ def _create_rapl_domain(
     domain_dir.mkdir(parents=True, exist_ok=True)
     (domain_dir / "name").write_text(name)
     (domain_dir / "energy_uj").write_text(str(energy_uj))
-    (domain_dir / "max_energy_range_uj").write_text(
-        str(max_energy_uj)
-    )
+    (domain_dir / "max_energy_range_uj").write_text(str(max_energy_uj))
     return domain_dir
 
 
@@ -50,12 +52,18 @@ def _build_fake_sysfs(tmp_path: Path) -> Path:
     rapl_base.mkdir()
 
     _create_rapl_domain(
-        rapl_base, "package-0", "intel-rapl:0",
-        energy_uj=500000, max_energy_uj=262143328850,
+        rapl_base,
+        "package-0",
+        "intel-rapl:0",
+        energy_uj=500000,
+        max_energy_uj=262143328850,
     )
     _create_rapl_domain(
-        rapl_base, "dram", "intel-rapl:0/intel-rapl:0:0",
-        energy_uj=100000, max_energy_uj=65535999603,
+        rapl_base,
+        "dram",
+        "intel-rapl:0/intel-rapl:0:0",
+        energy_uj=100000,
+        max_energy_uj=65535999603,
     )
     return rapl_base
 
@@ -127,16 +135,15 @@ class TestSampleNormalDelta:
 
         with patch(_PLAT, return_value="Linux"):
             monitor = RaplEnergyMonitor(
-                poll_interval_ms=50, rapl_base=rapl_base,
+                poll_interval_ms=50,
+                rapl_base=rapl_base,
             )
             assert monitor._initialized is True
             assert len(monitor._domains) == 2
 
         # Set start values
         pkg_energy = rapl_base / "intel-rapl:0" / "energy_uj"
-        dram_energy = (
-            rapl_base / "intel-rapl:0" / "intel-rapl:0:0" / "energy_uj"
-        )
+        dram_energy = rapl_base / "intel-rapl:0" / "intel-rapl:0:0" / "energy_uj"
         pkg_energy.write_text("500000")
         dram_energy.write_text("100000")
 
@@ -151,9 +158,9 @@ class TestSampleNormalDelta:
         assert result.cpu_energy_joules == pytest.approx(100000 / 1e6)
         assert result.dram_energy_joules == pytest.approx(20000 / 1e6)
         assert result.energy_joules == pytest.approx(120000 / 1e6)
-        assert result.vendor == "cpu_rapl"
-        assert result.energy_method == "rapl"
-        assert result.duration_seconds >= 0
+        assert_sample_result_basics(
+            result, vendor="cpu_rapl", energy_method="rapl"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -169,13 +176,17 @@ class TestSampleWrapAround:
 
         max_energy = 1000000
         _create_rapl_domain(
-            rapl_base, "package-0", "intel-rapl:0",
-            energy_uj=900000, max_energy_uj=max_energy,
+            rapl_base,
+            "package-0",
+            "intel-rapl:0",
+            energy_uj=900000,
+            max_energy_uj=max_energy,
         )
 
         with patch(_PLAT, return_value="Linux"):
             monitor = RaplEnergyMonitor(
-                poll_interval_ms=50, rapl_base=rapl_base,
+                poll_interval_ms=50,
+                rapl_base=rapl_base,
             )
             assert monitor._initialized is True
 
@@ -205,14 +216,13 @@ class TestSampleDomainCategorization:
 
         with patch(_PLAT, return_value="Linux"):
             monitor = RaplEnergyMonitor(
-                poll_interval_ms=50, rapl_base=rapl_base,
+                poll_interval_ms=50,
+                rapl_base=rapl_base,
             )
 
         # Set start values
         pkg_energy = rapl_base / "intel-rapl:0" / "energy_uj"
-        dram_energy = (
-            rapl_base / "intel-rapl:0" / "intel-rapl:0:0" / "energy_uj"
-        )
+        dram_energy = rapl_base / "intel-rapl:0" / "intel-rapl:0:0" / "energy_uj"
         pkg_energy.write_text("1000")
         dram_energy.write_text("2000")
 
@@ -237,12 +247,11 @@ class TestClose:
 
         with patch(_PLAT, return_value="Linux"):
             monitor = RaplEnergyMonitor(
-                poll_interval_ms=50, rapl_base=rapl_base,
+                poll_interval_ms=50,
+                rapl_base=rapl_base,
             )
             assert len(monitor._domains) == 2
             assert monitor._initialized is True
 
-        monitor.close()
-
+        assert_close_sets_uninitialized(monitor)
         assert monitor._domains == []
-        assert monitor._initialized is False

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from openjarvis.learning.intelligence.orchestrator.sft_trainer import (
     OrchestratorSFTConfig,
     OrchestratorSFTDataset,
@@ -97,15 +99,15 @@ class TestOrchestratorSFTDataset:
         trace_file = tmp_path / "traces.jsonl"
         traces = []
         for i in range(5):
-            traces.append({
-                "conversations": [
-                    {"role": "user", "content": f"q{i}"},
-                    {"role": "assistant", "content": f"a{i}"},
-                ]
-            })
-        trace_file.write_text(
-            "\n".join(json.dumps(t) for t in traces) + "\n"
-        )
+            traces.append(
+                {
+                    "conversations": [
+                        {"role": "user", "content": f"q{i}"},
+                        {"role": "assistant", "content": f"a{i}"},
+                    ]
+                }
+            )
+        trace_file.write_text("\n".join(json.dumps(t) for t in traces) + "\n")
 
         tok = MagicMock()
         tok.eos_token = ""
@@ -123,9 +125,60 @@ class TestOrchestratorSFTDataset:
         assert len(batches) == 3  # 2+2+1
 
 
+class TestSFTLabelMasking:
+    """Regression for #521: padding positions must be excluded from the SFT loss.
+
+    With ``padding="max_length"`` and ``pad_token == eos_token``, an unmasked
+    ``labels`` makes the model optimise "predict EOS at a padded position" for
+    the bulk of every example, diluting the gradient on real content and
+    understating the reported loss. ``labels`` must be ``-100`` wherever
+    ``attention_mask == 0`` and equal to ``input_ids`` elsewhere — without
+    mutating ``input_ids`` (the pre-fix code aliased the two).
+    """
+
+    def test_getitem_masks_padding_positions(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        import json
+
+        trace_file = tmp_path / "traces.jsonl"
+        trace_file.write_text(
+            json.dumps(
+                {
+                    "conversations": [
+                        {"role": "user", "content": "hi"},
+                        {"role": "assistant", "content": "yo"},
+                    ]
+                }
+            )
+            + "\n"
+        )
+
+        class _FakeTokenizer:
+            """Returns a fixed padded encoding: 2 real tokens, 6 pad (id 0)."""
+
+            eos_token = "</s>"
+
+            def __call__(self, text, **kwargs):
+                input_ids = torch.tensor([[11, 12, 0, 0, 0, 0, 0, 0]])
+                attention_mask = torch.tensor([[1, 1, 0, 0, 0, 0, 0, 0]])
+                return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+        ds = OrchestratorSFTDataset(
+            trace_path=str(trace_file), tokenizer=_FakeTokenizer()
+        )
+        item = ds[0]
+        ids, mask, labels = item["input_ids"], item["attention_mask"], item["labels"]
+
+        assert (labels[mask == 0] == -100).all()  # padded -> ignored by loss
+        assert (labels[mask == 1] == ids[mask == 1]).all()  # real -> unchanged
+        assert (ids[mask == 0] != -100).all()  # input_ids not mutated in place
+        assert not torch.equal(ids, labels)  # masked clone, not an alias
+
+
 class TestSFTRegistration:
     def test_registered_in_learning_registry(self):
         # Import to trigger registration
         import openjarvis.learning.intelligence.orchestrator.sft_trainer  # noqa: F401
         from openjarvis.core.registry import LearningRegistry
+
         assert LearningRegistry.contains("orchestrator_sft")

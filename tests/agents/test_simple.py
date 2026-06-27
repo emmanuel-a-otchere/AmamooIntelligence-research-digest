@@ -57,8 +57,10 @@ class TestSimpleAgent:
         agent.run("Hello")
         call_args = engine.generate.call_args
         messages = call_args[1].get("messages") or call_args[0][0]
-        assert len(messages) == 1
-        assert messages[0].role == Role.USER
+        # Default system prompt + user message
+        assert len(messages) == 2
+        assert messages[0].role == Role.SYSTEM
+        assert messages[1].role == Role.USER
 
     def test_custom_temperature(self):
         engine = _make_mock_engine()
@@ -91,10 +93,7 @@ class TestSimpleAgent:
         agent = SimpleAgent(engine, "test-model", bus=bus)
         agent.run("test input")
         evts = bus.history
-        start = [
-            e for e in evts
-            if e.event_type == EventType.AGENT_TURN_START
-        ][0]
+        start = [e for e in evts if e.event_type == EventType.AGENT_TURN_START][0]
         assert start.data["agent"] == "simple"
         assert start.data["input"] == "test input"
 

@@ -36,14 +36,15 @@ class TestWebSearchTool:
         assert result.success is False
         assert "No query" in result.content
 
-    def test_execute_no_api_key(self):
+    def test_execute_no_api_key(self, monkeypatch):
+        """When no API key, falls back to DuckDuckGo."""
         tool = WebSearchTool(api_key=None)
-        # Clear env var to ensure no fallback
         with patch.dict("os.environ", {}, clear=True):
             tool._api_key = None
+            monkeypatch.delitem(sys.modules, "tavily", raising=False)
             result = tool.execute(query="test query")
-        assert result.success is False
-        assert "No API key" in result.content
+        assert result.success is True
+        assert result.metadata["engine"] == "duckduckgo"
 
     def test_execute_mocked_tavily(self, monkeypatch):
         mock_client = MagicMock()
@@ -63,7 +64,21 @@ class TestWebSearchTool:
         }
         mock_tavily_module = MagicMock()
         mock_tavily_module.TavilyClient.return_value = mock_client
-        monkeypatch.setitem(sys.modules, "tavily", mock_tavily_module)
+
+        import builtins
+
+        original_import = builtins.__import__
+
+        def _mock_import(name, *args, **kwargs):
+            if name == "tavily":
+                return mock_tavily_module
+            if name == "tavily.errors":
+                mock_errors = MagicMock()
+                mock_errors.UsageLimitExceededError = Exception
+                return mock_errors
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _mock_import)
 
         tool = WebSearchTool(api_key="test-key")
         result = tool.execute(query="test query")
@@ -73,27 +88,91 @@ class TestWebSearchTool:
         assert result.metadata["num_results"] == 2
 
     def test_execute_tavily_error(self, monkeypatch):
+        """When Tavily errors (any error), falls back to DuckDuckGo."""
+        import builtins
+        from typing import Any
+
+        original_import = builtins.__import__
+
+        class TavilyError(Exception):
+            def __init__(self, message: str):
+                super().__init__(message)
+
         mock_client = MagicMock()
-        mock_client.search.side_effect = RuntimeError("API rate limit exceeded")
+        mock_client.search.side_effect = TavilyError("API error")
         mock_tavily_module = MagicMock()
         mock_tavily_module.TavilyClient.return_value = mock_client
-        monkeypatch.setitem(sys.modules, "tavily", mock_tavily_module)
+
+        def _mock_import(name: str, *args: Any, **kwargs: Any):
+            if name == "tavily":
+                return mock_tavily_module
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _mock_import)
 
         tool = WebSearchTool(api_key="test-key")
         result = tool.execute(query="test query")
-        assert result.success is False
-        assert "Search error" in result.content
+        assert result.success is True
+        assert result.metadata["engine"] == "duckduckgo"
+
+    def test_execute_duckduckgo_fallback_format(self, monkeypatch):
+        """DuckDuckGo fallback returns properly formatted results."""
+        mock_tavily_module = MagicMock()
+        mock_tavily_module.TavilyClient.side_effect = ImportError(
+            "No module named 'tavily'"
+        )
+        monkeypatch.setitem(sys.modules, "tavily", mock_tavily_module)
+
+        mock_ddgs = MagicMock()
+        mock_ddgs.text.return_value = [
+            {
+                "title": "DDG Result 1",
+                "href": "https://example.com/1",
+                "body": "Content 1",
+            },
+            {
+                "title": "DDG Result 2",
+                "href": "https://example.com/2",
+                "body": "Content 2",
+            },
+        ]
+        mock_ddgs_module = MagicMock()
+        mock_ddgs_module.DDGS.return_value = mock_ddgs
+        monkeypatch.setitem(sys.modules, "ddgs", mock_ddgs_module)
+
+        tool = WebSearchTool(api_key="test-key")
+        result = tool.execute(query="test query")
+        assert result.success is True
+        assert "DDG Result 1" in result.content
+        assert "DDG Result 2" in result.content
+        assert "https://example.com/1" in result.content
+        assert result.metadata["engine"] == "duckduckgo"
 
     def test_max_results_parameter(self, monkeypatch):
+        import builtins
+
+        original_import = builtins.__import__
+
         mock_client = MagicMock()
         mock_client.search.return_value = {"results": []}
         mock_tavily_module = MagicMock()
         mock_tavily_module.TavilyClient.return_value = mock_client
-        monkeypatch.setitem(sys.modules, "tavily", mock_tavily_module)
+        mock_errors = MagicMock()
+
+        def _mock_import(name, *args, **kwargs):
+            if name == "tavily":
+                return mock_tavily_module
+            if name == "tavily.errors":
+                return mock_errors
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _mock_import)
 
         tool = WebSearchTool(api_key="test-key", max_results=3)
         tool.execute(query="test", max_results=7)
-        mock_client.search.assert_called_once_with("test", max_results=7)
+        mock_client.search.assert_called_once_with(
+            "test", max_results=7, search_depth="advanced", include_usage=True
+        )
 
     def test_to_openai_function(self):
         tool = WebSearchTool(api_key="test-key")
@@ -103,8 +182,7 @@ class TestWebSearchTool:
         assert "query" in fn["function"]["parameters"]["properties"]
 
     def test_execute_import_error(self, monkeypatch):
-        """Simulate tavily-python not being installed."""
-        # Remove tavily from sys.modules if present, and make import fail
+        """When tavily-python not installed, falls back to DuckDuckGo."""
         monkeypatch.delitem(sys.modules, "tavily", raising=False)
         import builtins
 
@@ -119,15 +197,28 @@ class TestWebSearchTool:
 
         tool = WebSearchTool(api_key="test-key")
         result = tool.execute(query="test query")
-        assert result.success is False
-        assert "tavily-python not installed" in result.content
+        assert result.success is True
+        assert result.metadata["engine"] == "duckduckgo"
 
     def test_empty_results(self, monkeypatch):
+        import builtins
+
+        original_import = builtins.__import__
+
         mock_client = MagicMock()
         mock_client.search.return_value = {"results": []}
         mock_tavily_module = MagicMock()
         mock_tavily_module.TavilyClient.return_value = mock_client
-        monkeypatch.setitem(sys.modules, "tavily", mock_tavily_module)
+        mock_errors = MagicMock()
+
+        def _mock_import(name, *args, **kwargs):
+            if name == "tavily":
+                return mock_tavily_module
+            if name == "tavily.errors":
+                return mock_errors
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _mock_import)
 
         tool = WebSearchTool(api_key="test-key")
         result = tool.execute(query="obscure query")
@@ -141,6 +232,82 @@ class TestWebSearchTool:
     def test_registry_registration(self):
         ToolRegistry.register_value("web_search", WebSearchTool)
         assert ToolRegistry.contains("web_search")
+
+    def test_tavily_results_use_labeled_content_format(self, monkeypatch):
+        """Regression for #390: results expose page CONTENT under labeled
+        Source/Summary headings (so agents synthesize content, not echo
+        URLs), and Tavily is queried with search_depth='advanced'."""
+        import builtins
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {
+                    "title": "Result 1",
+                    "url": "https://example.com/1",
+                    "content": "Content about test.",
+                },
+            ]
+        }
+        mock_tavily_module = MagicMock()
+        mock_tavily_module.TavilyClient.return_value = mock_client
+        original_import = builtins.__import__
+
+        def _mock_import(name, *args, **kwargs):
+            if name == "tavily":
+                return mock_tavily_module
+            if name == "tavily.errors":
+                mock_errors = MagicMock()
+                mock_errors.UsageLimitExceededError = Exception
+                return mock_errors
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _mock_import)
+
+        tool = WebSearchTool(api_key="test-key")
+        result = tool.execute(query="test query")
+        assert result.success is True
+        # Labeled structure with the page content surfaced.
+        assert "### Result 1" in result.content
+        assert "Source: https://example.com/1" in result.content
+        assert "Summary: Content about test." in result.content
+        # search_depth='advanced' is what pulls richer content from Tavily.
+        _, kwargs = mock_client.search.call_args
+        assert kwargs.get("search_depth") == "advanced"
+
+    def test_tavily_falls_back_to_snippet_when_no_content(self, monkeypatch):
+        """When a Tavily result lacks 'content', the 'snippet' field is used
+        for the Summary rather than rendering an empty summary."""
+        import builtins
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {
+                    "title": "Snippet Only",
+                    "url": "https://example.com/s",
+                    "snippet": "Fallback snippet text.",
+                },
+            ]
+        }
+        mock_tavily_module = MagicMock()
+        mock_tavily_module.TavilyClient.return_value = mock_client
+        original_import = builtins.__import__
+
+        def _mock_import(name, *args, **kwargs):
+            if name == "tavily":
+                return mock_tavily_module
+            if name == "tavily.errors":
+                mock_errors = MagicMock()
+                mock_errors.UsageLimitExceededError = Exception
+                return mock_errors
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _mock_import)
+
+        tool = WebSearchTool(api_key="test-key")
+        result = tool.execute(query="test query")
+        assert "Summary: Fallback snippet text." in result.content
 
 
 # ---------------------------------------------------------------------------
@@ -190,9 +357,7 @@ class TestUrlNormalization:
         assert url == "https://arxiv.org/abs/2310.03714"
 
     def test_arxiv_pdf_with_extension(self):
-        url = WebSearchTool._normalize_url(
-            "https://arxiv.org/pdf/2310.03714.pdf"
-        )
+        url = WebSearchTool._normalize_url("https://arxiv.org/pdf/2310.03714.pdf")
         assert url == "https://arxiv.org/abs/2310.03714"
 
     def test_non_arxiv_unchanged(self):
@@ -205,10 +370,17 @@ class TestUrlNormalization:
 
 
 class TestUrlFetching:
+    def _mock_ssrf(self, monkeypatch):
+        """Stub out the SSRF check (requires Rust backend)."""
+        import openjarvis.tools.web_search as _ws
+
+        monkeypatch.setattr(_ws, "check_ssrf", lambda url: None)
+
     def test_fetch_url_success(self, monkeypatch):
         """Mocked HTTP GET returns HTML, stripped to text."""
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         mock_resp = MagicMock()
         mock_resp.text = "<html><body><p>Hello world</p></body></html>"
         mock_resp.headers = {"content-type": "text/html"}
@@ -221,10 +393,9 @@ class TestUrlFetching:
     def test_fetch_url_strips_scripts(self, monkeypatch):
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         mock_resp = MagicMock()
-        mock_resp.text = (
-            "<html><script>var x=1;</script><body>Content</body></html>"
-        )
+        mock_resp.text = "<html><script>var x=1;</script><body>Content</body></html>"
         mock_resp.headers = {"content-type": "text/html"}
         mock_resp.raise_for_status = MagicMock()
         monkeypatch.setattr(httpx, "get", MagicMock(return_value=mock_resp))
@@ -236,6 +407,7 @@ class TestUrlFetching:
     def test_fetch_url_truncates_long_content(self, monkeypatch):
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         mock_resp = MagicMock()
         mock_resp.text = "<p>" + "x" * 10000 + "</p>"
         mock_resp.headers = {"content-type": "text/html"}
@@ -249,6 +421,7 @@ class TestUrlFetching:
     def test_fetch_url_pdf_content_type(self, monkeypatch):
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         mock_resp = MagicMock()
         mock_resp.text = "%PDF-1.4 binary data"
         mock_resp.headers = {"content-type": "application/pdf"}
@@ -261,10 +434,17 @@ class TestUrlFetching:
 
 
 class TestExecuteWithUrl:
+    def _mock_ssrf(self, monkeypatch):
+        """Stub out the SSRF check (requires Rust backend)."""
+        import openjarvis.tools.web_search as _ws
+
+        monkeypatch.setattr(_ws, "check_ssrf", lambda url: None)
+
     def test_execute_with_url_query(self, monkeypatch):
         """When query is a URL, fetch instead of search."""
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         mock_resp = MagicMock()
         mock_resp.text = "<html><body>Page content here</body></html>"
         mock_resp.headers = {"content-type": "text/html"}
@@ -281,6 +461,7 @@ class TestExecuteWithUrl:
         """When query contains a URL within text, detect and fetch it."""
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         mock_resp = MagicMock()
         mock_resp.text = "<html><body>Article text</body></html>"
         mock_resp.headers = {"content-type": "text/html"}
@@ -288,18 +469,33 @@ class TestExecuteWithUrl:
         monkeypatch.setattr(httpx, "get", MagicMock(return_value=mock_resp))
 
         tool = WebSearchTool(api_key="test-key")
-        result = tool.execute(
-            query="Summarize https://example.com/article please"
-        )
+        result = tool.execute(query="Summarize https://example.com/article please")
         assert result.success is True
         assert result.metadata.get("mode") == "fetch"
+
+    def test_execute_url_ssrf_blocked(self, monkeypatch):
+        """SSRF check rejects unsafe URLs before any HTTP request."""
+        import openjarvis.tools.web_search as _ws
+
+        monkeypatch.setattr(
+            _ws,
+            "check_ssrf",
+            lambda url: "private IP blocked",
+        )
+
+        tool = WebSearchTool(api_key="test-key")
+        result = tool.execute(query="http://169.254.169.254/metadata")
+        assert result.success is False
+        assert "private IP blocked" in result.content
 
     def test_execute_url_fetch_failure(self, monkeypatch):
         """URL fetch failure returns error result."""
         import httpx
 
+        self._mock_ssrf(monkeypatch)
         monkeypatch.setattr(
-            httpx, "get",
+            httpx,
+            "get",
             MagicMock(side_effect=httpx.HTTPError("Connection failed")),
         )
 

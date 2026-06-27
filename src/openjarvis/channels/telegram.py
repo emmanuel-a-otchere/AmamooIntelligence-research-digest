@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import textwrap
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -70,7 +71,8 @@ class TelegramChannel(BaseChannel):
             from telegram.ext import ApplicationBuilder  # noqa: F401
 
             self._listener_thread = threading.Thread(
-                target=self._poll_loop, daemon=True,
+                target=self._poll_loop,
+                daemon=True,
             )
             self._listener_thread.start()
             self._status = ChannelStatus.CONNECTED
@@ -108,26 +110,43 @@ class TelegramChannel(BaseChannel):
         try:
             import httpx
 
+            _TELEGRAM_MAX_LEN = 4096
             url = f"https://api.telegram.org/bot{self._token}/sendMessage"
-            payload: Dict[str, Any] = {
-                "chat_id": channel,
-                "text": content,
-            }
-            if self._parse_mode:
-                payload["parse_mode"] = self._parse_mode
-            if conversation_id:
-                payload["reply_to_message_id"] = conversation_id
-
-            resp = httpx.post(url, json=payload, timeout=10.0)
-            if resp.status_code < 300:
-                self._publish_sent(channel, content, conversation_id)
-                return True
-            logger.warning(
-                "Telegram API returned status %d: %s",
-                resp.status_code,
-                resp.text,
+            # Canonical channel send contract (see BaseChannel.send): the first
+            # positional ``channel`` arg is the DESTINATION (the Telegram chat
+            # id).  ``conversation_id`` is the inbound message id used as a
+            # reply/thread reference (``reply_to_message_id``).  We fall back to
+            # ``conversation_id`` as the chat id only when ``channel`` is empty,
+            # for backwards compatibility with legacy callers that passed the
+            # chat id via ``conversation_id``.
+            chat_id = channel or conversation_id
+            reply_to = conversation_id if (channel and conversation_id) else ""
+            chunks = textwrap.wrap(
+                content,
+                width=_TELEGRAM_MAX_LEN,
+                break_long_words=True,
+                replace_whitespace=False,
             )
-            return False
+            for chunk in chunks:
+                payload: Dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "text": chunk,
+                }
+                if self._parse_mode:
+                    payload["parse_mode"] = self._parse_mode
+                if reply_to:
+                    payload["reply_to_message_id"] = reply_to
+
+                resp = httpx.post(url, json=payload, timeout=10.0)
+                if resp.status_code >= 300:
+                    logger.warning(
+                        "Telegram API returned status %d: %s",
+                        resp.status_code,
+                        resp.text,
+                    )
+                    return False
+            self._publish_sent(channel, content, conversation_id)
+            return True
         except Exception:
             logger.debug("Telegram send failed", exc_info=True)
             return False
@@ -164,6 +183,19 @@ class TelegramChannel(BaseChannel):
                     message_id=str(msg.message_id),
                     conversation_id=str(msg.chat.id),
                 )
+                # Enforce allow-list when configured
+                if self._allowed_chat_ids:
+                    _allowed = {
+                        cid.strip()
+                        for cid in self._allowed_chat_ids.split(",")
+                        if cid.strip()
+                    }
+                    if cm.conversation_id not in _allowed:
+                        logger.debug(
+                            "Ignoring message from unlisted chat %s",
+                            cm.conversation_id,
+                        )
+                        return
                 for handler in self._handlers:
                     try:
                         handler(cm)
@@ -181,7 +213,7 @@ class TelegramChannel(BaseChannel):
                     )
 
             app.add_handler(MessageHandler(filters.TEXT, _handle_msg))
-            app.run_polling(stop_signals=None)
+            app.run_polling(stop_signals=None, drop_pending_updates=True)
         except Exception:
             logger.debug("Telegram poll loop error", exc_info=True)
             self._status = ChannelStatus.ERROR

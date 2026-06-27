@@ -76,6 +76,12 @@ def _run_git(
             content="git binary not found.",
             success=False,
         )
+    except NotADirectoryError as exc:
+        return ToolResult(
+            tool_name=tool_name,
+            content=f"Invalid repository path: {exc}",
+            success=False,
+        )
     except subprocess.TimeoutExpired:
         return ToolResult(
             tool_name=tool_name,
@@ -121,8 +127,7 @@ class GitStatusTool(BaseTool):
                     "repo_path": {
                         "type": "string",
                         "description": (
-                            "Path to the git repository."
-                            " Default: current directory."
+                            "Path to the git repository. Default: current directory."
                         ),
                     },
                 },
@@ -176,22 +181,19 @@ class GitDiffTool(BaseTool):
                     "repo_path": {
                         "type": "string",
                         "description": (
-                            "Path to the git repository."
-                            " Default: current directory."
+                            "Path to the git repository. Default: current directory."
                         ),
                     },
                     "staged": {
                         "type": "boolean",
                         "description": (
-                            "Show staged changes instead of"
-                            " unstaged. Default: false."
+                            "Show staged changes instead of unstaged. Default: false."
                         ),
                     },
                     "path": {
                         "type": "string",
                         "description": (
-                            "Specific file path to diff."
-                            " Default: all files."
+                            "Specific file path to diff. Default: all files."
                         ),
                     },
                 },
@@ -262,8 +264,7 @@ class GitCommitTool(BaseTool):
                     "repo_path": {
                         "type": "string",
                         "description": (
-                            "Path to the git repository."
-                            " Default: current directory."
+                            "Path to the git repository. Default: current directory."
                         ),
                     },
                     "files": {
@@ -304,7 +305,8 @@ class GitCommitTool(BaseTool):
                     success=False,
                 )
             add_result = _run_git(
-                ["git", "add"] + file_list, cwd=repo_path,
+                ["git", "add"] + file_list,
+                cwd=repo_path,
             )
             if not add_result.success:
                 return ToolResult(
@@ -316,7 +318,8 @@ class GitCommitTool(BaseTool):
 
         # Commit
         return _run_git(
-            ["git", "commit", "-m", message], cwd=repo_path,
+            ["git", "commit", "-m", message],
+            cwd=repo_path,
         )
 
 
@@ -345,23 +348,16 @@ class GitLogTool(BaseTool):
                     "repo_path": {
                         "type": "string",
                         "description": (
-                            "Path to the git repository."
-                            " Default: current directory."
+                            "Path to the git repository. Default: current directory."
                         ),
                     },
                     "count": {
                         "type": "integer",
-                        "description": (
-                            "Number of commits to show."
-                            " Default: 10."
-                        ),
+                        "description": ("Number of commits to show. Default: 10."),
                     },
                     "oneline": {
                         "type": "boolean",
-                        "description": (
-                            "Use --oneline format."
-                            " Default: true."
-                        ),
+                        "description": ("Use --oneline format. Default: true."),
                     },
                 },
                 "required": [],

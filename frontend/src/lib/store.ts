@@ -2,9 +2,12 @@ import { create } from 'zustand';
 import type {
   Conversation,
   ChatMessage,
+  LiveEnergyMetrics,
   LogEntry,
   ModelInfo,
   MessageTelemetry,
+  ResearchSearchTrace,
+  ResearchSource,
   SavingsData,
   ServerInfo,
   StreamState,
@@ -12,6 +15,13 @@ import type {
   TokenUsage,
 } from '../types';
 import type { ManagedAgent } from './api';
+
+export interface CachedConnector {
+  connector_id: string;
+  display_name: string;
+  connected: boolean;
+  chunks: number;
+}
 
 export interface AgentEvent {
   type: string;
@@ -60,6 +70,10 @@ export type ThemeMode = 'light' | 'dark' | 'system';
 interface Settings {
   theme: ThemeMode;
   apiUrl: string;
+  // Local server API key (OPENJARVIS_API_KEY). Sent as a Bearer token on
+  // /v1 + /api requests so a key-protected `jarvis serve` doesn't 401 the
+  // frontend (#266). Empty = no auth header (keyless local default).
+  apiKey: string;
   fontSize: 'small' | 'default' | 'large';
   defaultModel: string;
   defaultAgent: string;
@@ -72,6 +86,7 @@ function loadSettings(): Settings {
   const defaults: Settings = {
     theme: 'system',
     apiUrl: '',
+    apiKey: '',
     fontSize: 'default',
     defaultModel: '',
     defaultAgent: '',
@@ -138,6 +153,7 @@ interface AppState {
 
   // Actions: conversations
   loadConversations: () => void;
+  importOverlayConversation: () => Promise<void>;
   createConversation: (model?: string) => string;
   selectConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
@@ -149,9 +165,16 @@ interface AppState {
     toolCalls?: ToolCallInfo[],
     usage?: TokenUsage,
     telemetry?: MessageTelemetry,
+    audio?: { url: string },
+    researchTraces?: ResearchSearchTrace[],
+    researchSources?: ResearchSource[],
   ) => void;
   setStreamState: (state: Partial<StreamState>) => void;
   resetStream: () => void;
+
+  // Deep Research toggle
+  deepResearch: boolean;
+  setDeepResearch: (on: boolean) => void;
 
   // Actions: models & server
   setModels: (models: ModelInfo[]) => void;
@@ -159,6 +182,13 @@ interface AppState {
   setSelectedModel: (model: string) => void;
   setServerInfo: (info: ServerInfo | null) => void;
   setSavings: (data: SavingsData | null) => void;
+  incrementSavings: (usage: TokenUsage) => void;
+
+  // Live GPU metrics — streamed from /api/research system_metrics events.
+  // When non-null, the System panel renders this instead of polled values
+  // so Power (W) and Energy (kJ) update in real time during a research run.
+  liveEnergy: LiveEnergyMetrics | null;
+  setLiveEnergy: (data: LiveEnergyMetrics | null) => void;
 
   // Actions: settings
   updateSettings: (partial: Partial<Settings>) => void;
@@ -169,6 +199,10 @@ interface AppState {
   setSidebarOpen: (open: boolean) => void;
   toggleSystemPanel: () => void;
   setSystemPanelOpen: (open: boolean) => void;
+
+  // Data sources (cached between visits to avoid empty-state flicker)
+  cachedConnectors: CachedConnector[] | null;
+  setCachedConnectors: (list: CachedConnector[] | null) => void;
 
   // Agents
   managedAgents: ManagedAgent[];
@@ -244,6 +278,42 @@ export const useAppStore = create<AppState>((set, get) => {
         ),
         activeId: store.activeId,
       });
+    },
+
+    importOverlayConversation: async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const raw = await invoke<string>('get_overlay_conversation');
+        if (!raw || raw === '[]') return;
+        const overlay = JSON.parse(raw);
+        if (!overlay.id || !overlay.messages?.length) return;
+        const store = loadConversations();
+        const existing = store.conversations[overlay.id];
+        // Only update if the overlay has newer/more messages
+        if (existing && existing.messages.length >= overlay.messages.length) return;
+        // Track first use of overlay for this conversation
+        if (!existing) {
+          import('../lib/analytics').then(({ track }) => {
+            track('feature_used', { feature_name: 'overlay' });
+          });
+        }
+        store.conversations[overlay.id] = {
+          id: overlay.id,
+          title: overlay.title || 'Overlay chat',
+          createdAt: overlay.createdAt || Date.now(),
+          updatedAt: overlay.updatedAt || Date.now(),
+          model: overlay.model || 'default',
+          messages: overlay.messages,
+        };
+        saveConversations(store);
+        set({
+          conversations: Object.values(store.conversations).sort(
+            (a, b) => b.updatedAt - a.updatedAt,
+          ),
+        });
+      } catch {
+        // Overlay command unavailable (non-Tauri or no overlay data)
+      }
     },
 
     createConversation: (model?: string) => {
@@ -337,6 +407,9 @@ export const useAppStore = create<AppState>((set, get) => {
       toolCalls?: ToolCallInfo[],
       usage?: TokenUsage,
       telemetry?: MessageTelemetry,
+      audio?: { url: string },
+      researchTraces?: ResearchSearchTrace[],
+      researchSources?: ResearchSource[],
     ) => {
       const store = loadConversations();
       const conv = store.conversations[conversationId];
@@ -347,6 +420,9 @@ export const useAppStore = create<AppState>((set, get) => {
         if (toolCalls) lastMsg.toolCalls = toolCalls;
         if (usage) lastMsg.usage = usage;
         if (telemetry) lastMsg.telemetry = telemetry;
+        if (audio) lastMsg.audio = audio;
+        if (researchTraces) lastMsg.researchTraces = researchTraces;
+        if (researchSources) lastMsg.researchSources = researchSources;
         conv.updatedAt = Date.now();
         saveConversations(store);
         set({ messages: [...conv.messages] });
@@ -361,13 +437,45 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ streamState: INITIAL_STREAM });
     },
 
+    // ── Deep Research ─────────────────────────────────────────────
+    deepResearch: false,
+    setDeepResearch: (on: boolean) => set({ deepResearch: on }),
+
     // ── Models & server ────────────────────────────────────────────
 
-    setModels: (models: ModelInfo[]) => set({ models }),
+    setModels: (models: ModelInfo[]) =>
+      set((state) =>
+        !state.selectedModel && models.length > 0
+          ? { models, selectedModel: models[0].id }
+          : { models },
+      ),
     setModelsLoading: (loading: boolean) => set({ modelsLoading: loading }),
     setSelectedModel: (model: string) => set({ selectedModel: model }),
     setServerInfo: (info: ServerInfo | null) => set({ serverInfo: info }),
     setSavings: (data: SavingsData | null) => set({ savings: data }),
+    incrementSavings: (usage: TokenUsage) => {
+      const cur = get().savings;
+      const prompt = usage.prompt_tokens ?? 0;
+      const completion = usage.completion_tokens ?? 0;
+      const total = usage.total_tokens ?? prompt + completion;
+      set({
+        savings: {
+          total_calls: (cur?.total_calls ?? 0) + 1,
+          total_prompt_tokens: (cur?.total_prompt_tokens ?? 0) + prompt,
+          total_completion_tokens: (cur?.total_completion_tokens ?? 0) + completion,
+          total_tokens: (cur?.total_tokens ?? 0) + total,
+          local_cost: cur?.local_cost ?? 0,
+          per_provider: cur?.per_provider ?? [],
+          token_counting_version: cur?.token_counting_version,
+        },
+      });
+    },
+
+    liveEnergy: null,
+    setLiveEnergy: (data: LiveEnergyMetrics | null) => set({ liveEnergy: data }),
+
+    cachedConnectors: null,
+    setCachedConnectors: (list) => set({ cachedConnectors: list }),
 
     // ── Settings ───────────────────────────────────────────────────
 

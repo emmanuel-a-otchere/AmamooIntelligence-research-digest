@@ -37,10 +37,12 @@ class TestDefaults:
         assert ec.vllm.host == "http://localhost:8000"
         assert ec.sglang.host == "http://localhost:30000"
         assert ec.llamacpp.host == "http://localhost:8080"
+        assert ec.lemonade.host == "http://localhost:13305"
         assert ec.llamacpp.binary_path == ""
         # Backward-compat properties still work
         assert ec.ollama_host == ""
         assert ec.vllm_host == "http://localhost:8000"
+        assert ec.lemonade_host == "http://localhost:13305"
 
 
 class TestRecommendEngine:
@@ -74,7 +76,7 @@ class TestRecommendEngine:
             platform="linux",
             gpu=GpuInfo(vendor="amd", name="Radeon RX 7900 XTX"),
         )
-        assert recommend_engine(hw) == "vllm"
+        assert recommend_engine(hw) == "lemonade"
 
 
 class TestTomlLoading:
@@ -92,6 +94,36 @@ class TestTomlLoading:
         cfg = load_config(toml_file)
         assert cfg.engine.default == "vllm"
         assert cfg.memory.default_backend == "faiss"
+
+    def test_loads_nested_lemonade_host_override(self, tmp_path: Path) -> None:
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text(
+            '[engine]\ndefault = "lemonade"\n\n'
+            '[engine.lemonade]\nhost = "http://custom-lemonade:19000"\n'
+        )
+        cfg = load_config(toml_file)
+        assert cfg.engine.default == "lemonade"
+        assert cfg.engine.lemonade.host == "http://custom-lemonade:19000"
+        assert cfg.engine.lemonade_host == "http://custom-lemonade:19000"
+
+    def test_system_prompt_block_parsed(self, tmp_path: Path) -> None:
+        """Regression for #401: the [system_prompt] block (and its prefix)
+        must reach the runtime config, not be dropped by load_config()."""
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text(
+            '[system_prompt]\nprefix = "You are Jarvis."\nsoul_max_chars = 999\n'
+        )
+        cfg = load_config(toml_file)
+        assert cfg.system_prompt.prefix == "You are Jarvis."
+        assert cfg.system_prompt.soul_max_chars == 999
+
+    def test_config_without_system_prompt_block_defaults(self, tmp_path: Path) -> None:
+        """Backward compatibility: a config lacking [system_prompt] keeps
+        the empty-prefix default (no behavior change for existing configs)."""
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text('[engine]\ndefault = "ollama"\n')
+        cfg = load_config(toml_file)
+        assert cfg.system_prompt.prefix == ""
 
 
 class TestGenerateToml:
@@ -115,7 +147,7 @@ class TestSecurityConfig:
         assert sc.enabled is True
         assert sc.scan_input is True
         assert sc.scan_output is True
-        assert sc.mode == "warn"
+        assert sc.mode == "redact"
         assert sc.secret_scanner is True
         assert sc.pii_scanner is True
         assert sc.enforce_tool_confirmation is True
@@ -200,9 +232,18 @@ class TestAgentConfigNew:
 
     def test_no_temperature_or_max_tokens(self) -> None:
         ac = AgentConfig()
-        assert not hasattr(ac.__class__, "temperature") or isinstance(
-            getattr(ac.__class__, "temperature", None), property
-        ) is False
+        assert (
+            not hasattr(ac.__class__, "temperature")
+            or isinstance(getattr(ac.__class__, "temperature", None), property) is False
+        )
+
+    def test_default_system_prompt_anchors_identity(self) -> None:
+        """#540: the hardened wording must name OpenJarvis and explicitly
+        deny the model's training identity so distilled models stop
+        claiming to be Claude/ChatGPT/etc."""
+        prompt = AgentConfig().default_system_prompt
+        assert "OpenJarvis" in prompt
+        assert "not Claude" in prompt
 
 
 class TestNestedEngineConfig:
@@ -212,6 +253,7 @@ class TestNestedEngineConfig:
         assert ec.vllm.host == "http://localhost:8000"
         assert ec.sglang.host == "http://localhost:30000"
         assert ec.llamacpp.host == "http://localhost:8080"
+        assert ec.lemonade.host == "http://localhost:13305"
         assert ec.llamacpp.binary_path == ""
 
     def test_backward_compat_setter(self) -> None:
@@ -248,6 +290,17 @@ class TestNestedEngineConfig:
         cfg = load_config(toml_file)
         assert cfg.engine.ollama.host == "http://old:11434"
         assert cfg.engine.vllm.host == "http://old:8000"
+
+    def test_loads_old_flat_lemonade_host(self, tmp_path: Path) -> None:
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text(
+            '[engine]\ndefault = "lemonade"\n'
+            'lemonade_host = "http://legacy-lemonade:19191"\n'
+        )
+        cfg = load_config(toml_file)
+        assert cfg.engine.default == "lemonade"
+        assert cfg.engine.lemonade.host == "http://legacy-lemonade:19191"
+        assert cfg.engine.lemonade_host == "http://legacy-lemonade:19191"
 
 
 class TestNestedLearningConfig:
@@ -288,9 +341,9 @@ class TestNestedLearningConfig:
     def test_loads_nested_toml(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "config.toml"
         toml_file.write_text(
-            '[learning]\nenabled = true\nupdate_interval = 50\n\n'
+            "[learning]\nenabled = true\nupdate_interval = 50\n\n"
             '[learning.routing]\npolicy = "learned"\n\n'
-            '[learning.metrics]\nlatency_weight = 0.5\n'
+            "[learning.metrics]\nlatency_weight = 0.5\n"
         )
         cfg = load_config(toml_file)
         assert cfg.learning.enabled is True
@@ -315,16 +368,14 @@ class TestNestedLearningConfig:
 class TestBackwardCompatMigration:
     def test_agent_temperature_migrates_to_intelligence(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "config.toml"
-        toml_file.write_text(
-            '[agent]\ntemperature = 0.3\nmax_tokens = 512\n'
-        )
+        toml_file.write_text("[agent]\ntemperature = 0.3\nmax_tokens = 512\n")
         cfg = load_config(toml_file)
         assert cfg.intelligence.temperature == 0.3
         assert cfg.intelligence.max_tokens == 512
 
     def test_memory_context_injection_migrates_to_agent(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "config.toml"
-        toml_file.write_text('[memory]\ncontext_injection = false\n')
+        toml_file.write_text("[memory]\ncontext_injection = false\n")
         cfg = load_config(toml_file)
         assert cfg.agent.context_from_memory is False
 
@@ -400,8 +451,7 @@ class TestSandboxConfig:
     def test_loads_from_toml(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "config.toml"
         toml_file.write_text(
-            '[sandbox]\nenabled = true\ntimeout = 600\n'
-            'runtime = "podman"\n'
+            '[sandbox]\nenabled = true\ntimeout = 600\nruntime = "podman"\n'
         )
         cfg = load_config(toml_file)
         assert cfg.sandbox.enabled is True
@@ -435,7 +485,7 @@ class TestSchedulerConfig:
     def test_loads_from_toml(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "config.toml"
         toml_file.write_text(
-            '[scheduler]\nenabled = true\npoll_interval = 30\n'
+            "[scheduler]\nenabled = true\npoll_interval = 30\n"
             'db_path = "/tmp/sched.db"\n'
         )
         cfg = load_config(toml_file)
@@ -447,6 +497,47 @@ class TestSchedulerConfig:
 # ---------------------------------------------------------------------------
 # WhatsApp Baileys channel config tests
 # ---------------------------------------------------------------------------
+
+
+class TestApplyTomlSectionListNormalization:
+    def test_apply_toml_section_list_to_str_field(self) -> None:
+        """TOML arrays assigned to str-typed fields should be joined with ','."""
+        from openjarvis.core.config import ToolsConfig, _apply_toml_section
+
+        target = ToolsConfig()
+        tools = ["code_interpreter", "web_search", "file_read"]
+        _apply_toml_section(target, {"enabled": tools})
+        assert isinstance(target.enabled, str)
+        assert target.enabled == "code_interpreter,web_search,file_read"
+
+    def test_apply_toml_section_list_to_property_setter(self) -> None:
+        """TOML arrays passed to backward-compat property setters should be
+        normalized to comma-separated strings, not passed as raw lists."""
+        from openjarvis.core.config import _apply_toml_section
+
+        target = LearningConfig()
+        _apply_toml_section(
+            target,
+            {
+                "reward_weights": ["accuracy=0.8", "latency=0.2"],
+            },
+        )
+        assert target.metrics.accuracy_weight == 0.8
+        assert target.metrics.latency_weight == 0.2
+
+    def test_apply_toml_section_agent_tools_list(self) -> None:
+        """Agent tools should work as a TOML array."""
+        from openjarvis.core.config import _apply_toml_section
+
+        target = AgentConfig()
+        _apply_toml_section(
+            target,
+            {
+                "tools": ["web_search", "http_request", "file_read"],
+            },
+        )
+        assert isinstance(target.tools, str)
+        assert target.tools == "web_search,http_request,file_read"
 
 
 class TestWhatsAppBaileysChannelConfig:
@@ -469,3 +560,50 @@ class TestWhatsAppBaileysChannelConfig:
     def test_on_channel_config(self) -> None:
         cc = ChannelConfig()
         assert isinstance(cc.whatsapp_baileys, WhatsAppBaileysChannelConfig)
+
+
+# ---------------------------------------------------------------------------
+# Mining config integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_mining_config_absent_means_none(tmp_path):
+    from openjarvis.core.config import load_config
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text("")  # empty config
+    cfg = load_config(cfg_path)
+    assert cfg.mining is None
+
+
+def test_mining_config_solo_parsed(tmp_path):
+    from pathlib import Path
+
+    from openjarvis.core.config import load_config
+    from openjarvis.mining._stubs import SoloTarget
+
+    src = Path(__file__).parent.parent / "mining" / "fixtures" / "config_minimal.toml"
+    target = tmp_path / "config.toml"
+    target.write_text(src.read_text())
+    cfg = load_config(target)
+    assert cfg.mining is not None
+    assert cfg.mining.provider == "vllm-pearl"
+    assert cfg.mining.wallet_address == "prl1qexampleaddress"
+    assert isinstance(cfg.mining.submit_target, SoloTarget)
+    assert cfg.mining.submit_target.pearld_rpc_url == "http://localhost:44107"
+    assert cfg.mining.fee_bps == 0
+    assert cfg.mining.extra["model"] == "pearl-ai/Llama-3.3-70B-Instruct-pearl"
+
+
+def test_mining_config_pool_parsed_as_pool_target(tmp_path):
+    from pathlib import Path
+
+    from openjarvis.core.config import load_config
+    from openjarvis.mining._stubs import PoolTarget
+
+    src = Path(__file__).parent.parent / "mining" / "fixtures" / "config_pool_v2.toml"
+    target = tmp_path / "config.toml"
+    target.write_text(src.read_text())
+    cfg = load_config(target)
+    assert isinstance(cfg.mining.submit_target, PoolTarget)
+    assert cfg.mining.submit_target.url == "https://pool.openjarvis.ai/submit"

@@ -22,15 +22,24 @@ from openjarvis.channels._stubs import (
     ChannelStatus,
 )
 from openjarvis.core.events import EventBus, EventType
+from openjarvis.core.paths import get_config_dir
 from openjarvis.core.registry import ChannelRegistry
 
 logger = logging.getLogger(__name__)
 
 # Path to the bundled bridge shipped inside the package.
+# In editable installs this lives next to this file; in wheel installs
+# it is placed under _node_modules/ to avoid namespace package conflicts.
 _BRIDGE_SRC = Path(__file__).resolve().parent / "whatsapp_baileys_bridge"
+if not _BRIDGE_SRC.exists():
+    _BRIDGE_SRC = (
+        Path(__file__).resolve().parents[2]
+        / "_node_modules"
+        / "whatsapp_baileys_bridge"
+    )
 
 # Default runtime directory (npm install + auth state).
-_DEFAULT_RUNTIME_DIR = Path.home() / ".openjarvis" / "whatsapp_baileys_bridge"
+_DEFAULT_RUNTIME_DIR = get_config_dir() / "whatsapp_baileys_bridge"
 
 
 @ChannelRegistry.register("whatsapp_baileys")
@@ -101,8 +110,7 @@ class WhatsAppBaileysChannel(BaseChannel):
         pkg_dst = runtime / "package.json"
         pkg_src = _BRIDGE_SRC / "package.json"
         if pkg_src.exists() and (
-            not pkg_dst.exists()
-            or pkg_src.stat().st_mtime > pkg_dst.stat().st_mtime
+            not pkg_dst.exists() or pkg_src.stat().st_mtime > pkg_dst.stat().st_mtime
         ):
             shutil.copy2(pkg_src, pkg_dst)
 
@@ -161,7 +169,8 @@ class WhatsAppBaileysChannel(BaseChannel):
                 bufsize=1,
             )
             self._reader_thread = threading.Thread(
-                target=self._reader_loop, daemon=True,
+                target=self._reader_loop,
+                daemon=True,
             )
             self._reader_thread.start()
             logger.info(
@@ -210,11 +219,13 @@ class WhatsAppBaileysChannel(BaseChannel):
             return False
 
         try:
-            self._write_command({
-                "type": "send",
-                "jid": channel,
-                "text": content,
-            })
+            self._write_command(
+                {
+                    "type": "send",
+                    "jid": channel,
+                    "text": content,
+                }
+            )
             self._publish_sent(channel, content, conversation_id)
             return True
         except Exception:

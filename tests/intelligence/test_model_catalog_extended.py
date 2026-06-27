@@ -16,6 +16,7 @@ from openjarvis.intelligence.model_catalog import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_spec(model_id: str) -> ModelSpec:
     """Lookup a spec from the BUILTIN_MODELS list (not registry)."""
     for spec in BUILTIN_MODELS:
@@ -185,26 +186,26 @@ class TestCloudModelSpecs:
 class TestQwen35ModelSpecs:
     """Verify Qwen3.5 MoE model entries."""
 
-    def test_qwen35_3b(self) -> None:
-        spec = _get_spec("qwen3.5:3b")
-        assert spec.parameter_count_b == 3.0
-        assert spec.active_parameter_count_b == 0.6
+    def test_qwen35_2b(self) -> None:
+        spec = _get_spec("qwen3.5:2b")
+        assert spec.parameter_count_b == 2.0
+        assert spec.active_parameter_count_b == 0.4
         assert spec.context_length == 131072
         assert spec.provider == "alibaba"
         assert spec.metadata["architecture"] == "moe"
         for e in ("ollama", "vllm", "llamacpp", "sglang"):
             assert e in spec.supported_engines
 
-    def test_qwen35_8b(self) -> None:
-        spec = _get_spec("qwen3.5:8b")
-        assert spec.parameter_count_b == 8.0
-        assert spec.active_parameter_count_b == 1.0
+    def test_qwen35_9b(self) -> None:
+        spec = _get_spec("qwen3.5:9b")
+        assert spec.parameter_count_b == 9.0
+        assert spec.active_parameter_count_b == 1.5
         assert spec.context_length == 131072
 
-    def test_qwen35_14b(self) -> None:
-        spec = _get_spec("qwen3.5:14b")
-        assert spec.parameter_count_b == 14.0
-        assert spec.active_parameter_count_b == 2.0
+    def test_qwen35_27b(self) -> None:
+        spec = _get_spec("qwen3.5:27b")
+        assert spec.parameter_count_b == 27.0
+        assert spec.active_parameter_count_b == 3.0
 
     def test_qwen35_35b(self) -> None:
         spec = _get_spec("qwen3.5:35b")
@@ -273,10 +274,19 @@ class TestModelDiscovery:
     def test_cloud_models_require_api_key(self) -> None:
         """All cloud models have requires_api_key=True."""
         cloud_ids = {
-            "gpt-4o", "gpt-4o-mini", "gpt-5-mini", "gpt-5-mini-2025-08-07",
-            "claude-sonnet-4-20250514", "claude-opus-4-20250514",
-            "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
-            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3-pro", "gemini-3-flash",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-5-mini",
+            "gpt-5-mini-2025-08-07",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-3-pro",
+            "gemini-3-flash",
         }
         for spec in BUILTIN_MODELS:
             if spec.model_id in cloud_ids:
@@ -287,9 +297,15 @@ class TestModelDiscovery:
     def test_moe_models_have_active_params(self) -> None:
         """MoE models have active_parameter_count_b set."""
         moe_ids = {
-            "gpt-oss:120b", "glm-4.7-flash", "trinity-mini",
-            "qwen3.5:3b", "qwen3.5:8b", "qwen3.5:14b",
-            "qwen3.5:35b", "qwen3.5:122b", "qwen3.5:397b",
+            "gpt-oss:120b",
+            "glm-4.7-flash",
+            "trinity-mini",
+            "qwen3.5:2b",
+            "qwen3.5:9b",
+            "qwen3.5:27b",
+            "qwen3.5:35b",
+            "qwen3.5:122b",
+            "qwen3.5:397b",
             "granite4.0-h-small",
         }
         for spec in BUILTIN_MODELS:
@@ -308,8 +324,12 @@ class TestModelDiscovery:
         """merge_discovered_models works for all new model IDs."""
         register_builtin_models()
         new_ids = [
-            "gpt-oss:120b", "glm-4.7-flash", "trinity-mini",
-            "gpt-5-mini", "claude-opus-4-6", "gemini-3-pro",
+            "gpt-oss:120b",
+            "glm-4.7-flash",
+            "trinity-mini",
+            "gpt-5-mini",
+            "claude-opus-4-6",
+            "gemini-3-pro",
         ]
         # Merging known IDs should not raise
         merge_discovered_models("vllm", new_ids)

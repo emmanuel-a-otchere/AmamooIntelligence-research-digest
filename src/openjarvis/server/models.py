@@ -41,16 +41,27 @@ class UsageInfo(BaseModel):
     total_tokens: int = 0
 
 
+class AudioMeta(BaseModel):
+    url: str
+
+
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
     content: Optional[str] = ""
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    audio: Optional[AudioMeta] = None
 
 
 class Choice(BaseModel):
     index: int = 0
     message: ChoiceMessage
     finish_reason: str = "stop"
+
+
+class ComplexityInfo(BaseModel):
+    score: float
+    tier: str
+    suggested_max_tokens: int
 
 
 class ChatCompletionResponse(BaseModel):
@@ -60,6 +71,7 @@ class ChatCompletionResponse(BaseModel):
     model: str = ""
     choices: List[Choice] = Field(default_factory=list)
     usage: UsageInfo = Field(default_factory=UsageInfo)
+    complexity: Optional[ComplexityInfo] = None
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +82,9 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    # Streaming tool_calls (OpenAI delta shape, with `index`). Present only
+    # on streamed raw function-calling responses (stream:true + tools).
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
 class StreamChoice(BaseModel):
@@ -110,6 +125,7 @@ __all__ = [
     "ChatMessage",
     "Choice",
     "ChoiceMessage",
+    "ComplexityInfo",
     "DeltaMessage",
     "ModelListResponse",
     "ModelObject",

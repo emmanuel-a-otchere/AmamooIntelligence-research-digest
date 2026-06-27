@@ -43,15 +43,21 @@ def memory() -> None:
 @memory.command()
 @click.argument("path")
 @click.option(
-    "--backend", "-b", default=None,
+    "--backend",
+    "-b",
+    default=None,
     help="Override the default memory backend.",
 )
 @click.option(
-    "--chunk-size", default=512, type=int,
+    "--chunk-size",
+    default=512,
+    type=int,
     help="Chunk size in tokens.",
 )
 @click.option(
-    "--chunk-overlap", default=64, type=int,
+    "--chunk-overlap",
+    default=64,
+    type=int,
     help="Overlap between chunks in tokens.",
 )
 def index(
@@ -108,11 +114,16 @@ def index(
 @memory.command()
 @click.argument("query", nargs=-1, required=True)
 @click.option(
-    "--top-k", "-k", default=5, type=int,
+    "--top-k",
+    "-k",
+    default=5,
+    type=int,
     help="Number of results to return.",
 )
 @click.option(
-    "--backend", "-b", default=None,
+    "--backend",
+    "-b",
+    default=None,
     help="Override the default memory backend.",
 )
 def search(
@@ -156,9 +167,71 @@ def search(
     console.print(table)
 
 
+def _get_fact_store():
+    """Instantiate the automatic-memory fact store from config."""
+    from openjarvis.memory.store import create_fact_store
+
+    config = load_config()
+    mem = config.memory
+    return create_fact_store(
+        getattr(mem, "backend", "local"),
+        path=getattr(mem, "facts_path", "~/.openjarvis/memory_facts.jsonl"),
+        max_facts=getattr(mem, "max_facts", 1000),
+    )
+
+
+@memory.command(name="list")
+def list_facts() -> None:
+    """List durable facts captured by the automatic memory service."""
+    console = Console()
+
+    store = _get_fact_store()
+    facts = store.list()
+    if not facts:
+        console.print("[yellow]No memory facts stored yet.[/yellow]")
+        return
+
+    table = Table(title=f"Memory Facts ({len(facts)})")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Fact")
+    table.add_column("Source", style="cyan")
+    for i, fact in enumerate(facts, 1):
+        table.add_row(str(i), fact.text, fact.source or "-")
+    console.print(table)
+
+
 @memory.command()
 @click.option(
-    "--backend", "-b", default=None,
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt.",
+)
+def clear(yes: bool) -> None:
+    """Remove all durable facts captured by the automatic memory service."""
+    console = Console()
+
+    store = _get_fact_store()
+    count = store.count()
+    if count == 0:
+        console.print("[yellow]No memory facts to clear.[/yellow]")
+        return
+
+    if not yes:
+        if not click.confirm(f"Remove all {count} stored memory fact(s)?"):
+            console.print("[dim]Aborted.[/dim]")
+            return
+
+    removed = store.clear()
+    console.print(f"[green]Cleared {removed} memory fact(s).[/green]")
+
+
+@memory.command()
+@click.option(
+    "--backend",
+    "-b",
+    default=None,
     help="Override the default memory backend.",
 )
 def stats(backend: str | None) -> None:

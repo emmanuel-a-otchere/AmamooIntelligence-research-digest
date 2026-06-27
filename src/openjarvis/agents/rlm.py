@@ -8,10 +8,15 @@ context and makes recursive sub-LM calls via ``llm_query()``/``llm_batch()``.
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
+from openjarvis.agents.prompt_loader import (
+    load_few_shot_exemplars,
+    load_system_prompt_override,
+)
 from openjarvis.agents.rlm_repl import RLMRepl
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
@@ -31,12 +36,18 @@ RLM_SYSTEM_PROMPT = (
     "prompt and get a response.\n"
     "- `llm_batch(prompts: list[str]) -> list[str]` — Call a "
     "sub-LM with multiple prompts.\n"
+    "- `tool_call(tool_name: str, args: dict) -> str` — Execute an "
+    "OpenJarvis tool and return its textual output.\n"
+    "- `read_file(path: str, max_lines: int = 120) -> str` — Read the "
+    "first N lines of a file through the real file_read tool.\n"
+    "- `read_file_chunk(path: str, start_line: int, end_line: int) -> str` "
+    "— Read only a bounded line range from a file.\n"
     "- `FINAL(value)` — Terminate and return `value` as the "
     "final answer.\n"
     "- `FINAL_VAR(var_name: str)` — Terminate and return the "
     "value of variable `var_name`.\n"
-    "- `answer` dict — Set `answer[\"value\"] = ...` and "
-    "`answer[\"ready\"] = True` to terminate.\n\n"
+    '- `answer` dict — Set `answer["value"] = ...` and '
+    '`answer["ready"] = True` to terminate.\n\n'
     "{tool_section}"
     "## Available Modules\n\n"
     "json, re, math, collections, itertools, functools, "
@@ -52,9 +63,17 @@ RLM_SYSTEM_PROMPT = (
     "and use `llm_query()` on each chunk.\n"
     "3. Combine sub-results programmatically.\n"
     "4. When you have the final answer, call "
-    "`FINAL(answer_value)` or `FINAL_VAR(\"var_name\")`.\n"
+    '`FINAL(answer_value)` or `FINAL_VAR("var_name")`.\n'
     "5. If you can answer directly without code, just respond "
     "with text (no code block).\n\n"
+    "6. For file access, web access, or any external side effect, use "
+    "the injected tool helpers (for example "
+    '`file_read(path="...")` or `tool_call("file_read", {{"path": "..."}})`). '
+    "Do NOT use open(), subprocess, urllib, or direct OS access.\n\n"
+    "7. For file-analysis tasks, do NOT dump whole files. Prefer "
+    "`read_file(path, max_lines=...)` or "
+    "`read_file_chunk(path, start_line, end_line)` and summarize "
+    "incrementally.\n\n"
     "## Strategy Tips\n\n"
     "- Split long text into paragraphs or sections, summarize "
     "each with `llm_query()`.\n"
@@ -84,6 +103,9 @@ class RLMAgent(ToolUsingAgent):
     """
 
     agent_id = "rlm"
+    _default_temperature = 0.7
+    _default_max_tokens = 2048
+    _default_max_turns = 10
 
     def __init__(
         self,
@@ -92,9 +114,9 @@ class RLMAgent(ToolUsingAgent):
         *,
         tools: Optional[List[BaseTool]] = None,
         bus: Optional[EventBus] = None,
-        max_turns: int = 10,
-        temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_turns: Optional[int] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         sub_model: Optional[str] = None,
         sub_temperature: float = 0.3,
         sub_max_tokens: int = 1024,
@@ -104,10 +126,15 @@ class RLMAgent(ToolUsingAgent):
         confirm_callback=None,
     ) -> None:
         super().__init__(
-            engine, model, tools=tools, bus=bus,
-            max_turns=max_turns, temperature=temperature,
+            engine,
+            model,
+            tools=tools,
+            bus=bus,
+            max_turns=max_turns,
+            temperature=temperature,
             max_tokens=max_tokens,
-            interactive=interactive, confirm_callback=confirm_callback,
+            interactive=interactive,
+            confirm_callback=confirm_callback,
         )
         # Override executor: RLM only creates one if tools are provided
         if not self._tools:
@@ -146,18 +173,21 @@ class RLMAgent(ToolUsingAgent):
         if self._custom_system_prompt:
             system_prompt = self._custom_system_prompt
         else:
+            prompt_template = load_system_prompt_override("rlm") or RLM_SYSTEM_PROMPT
             try:
-                system_prompt = RLM_SYSTEM_PROMPT.format(
+                system_prompt = prompt_template.format(
                     tool_section=tool_section,
                 )
             except KeyError:
-                # Custom system_prompt override without {tool_section}
-                system_prompt = RLM_SYSTEM_PROMPT
+                system_prompt = prompt_template
 
         # Create REPL with sub-LM callbacks
+        self._repl_tool_results: List[ToolResult] = []
         repl = RLMRepl(
             llm_query_fn=self._make_sub_query,
             llm_batch_fn=self._make_batch_query,
+            tool_call_fn=self._execute_tool_from_repl if self._executor else None,
+            tool_arg_names=self._tool_arg_names(),
             max_output_chars=self._max_output_chars,
         )
 
@@ -165,19 +195,38 @@ class RLMAgent(ToolUsingAgent):
         ctx_text = self._resolve_context(context)
         if ctx_text:
             repl.set_variable("context", ctx_text)
+        if self._executor is not None:
+            repl.set_variable("read_file", self._repl_read_file)
+            repl.set_variable("read_file_chunk", self._repl_read_file_chunk)
 
         # Build conversation
         messages = self._build_messages(
-            input, context, system_prompt=system_prompt,
+            input,
+            context,
+            system_prompt=system_prompt,
         )
+
+        # Inject few-shot exemplars before the user input
+        for ex in load_few_shot_exemplars("rlm"):
+            if ex.get("input") and ex.get("output"):
+                messages.insert(-1, Message(role=Role.USER, content=ex["input"]))
+                messages.insert(-1, Message(role=Role.ASSISTANT, content=ex["output"]))
 
         all_tool_results: list[ToolResult] = []
         turns = 0
+        total_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
 
         for _turn in range(self._max_turns):
             turns += 1
 
             result = self._generate(messages)
+            usage = result.get("usage", {})
+            for k in total_usage:
+                total_usage[k] += usage.get(k, 0)
             content = result.get("content", "")
 
             # Strip <think> tags
@@ -193,10 +242,15 @@ class RLMAgent(ToolUsingAgent):
                     content=content,
                     tool_results=all_tool_results,
                     turns=turns,
+                    metadata=total_usage,
                 )
 
             # Execute code in REPL
             output = repl.execute(code)
+
+            if self._repl_tool_results:
+                all_tool_results.extend(self._repl_tool_results)
+                self._repl_tool_results = []
 
             # Record as tool result
             tool_result = ToolResult(
@@ -218,14 +272,13 @@ class RLMAgent(ToolUsingAgent):
                     content=final_str,
                     tool_results=all_tool_results,
                     turns=turns,
+                    metadata=total_usage,
                 )
 
             # Feed output back as user message
             messages.append(Message(role=Role.ASSISTANT, content=content))
             feedback = (
-                f"REPL Output: {output}"
-                if output
-                else "REPL Output: (no output)"
+                f"REPL Output: {output}" if output else "REPL Output: (no output)"
             )
             messages.append(Message(role=Role.USER, content=feedback))
 
@@ -236,7 +289,9 @@ class RLMAgent(ToolUsingAgent):
         else:
             final_content = ""
 
-        return self._max_turns_result(all_tool_results, turns, content=final_content)
+        return self._max_turns_result(
+            all_tool_results, turns, content=final_content, metadata=total_usage
+        )
 
     # ------------------------------------------------------------------
     # Sub-LM callbacks
@@ -269,19 +324,23 @@ class RLMAgent(ToolUsingAgent):
                 )
                 for i, tc in enumerate(raw_tool_calls)
             ]
-            messages.append(Message(
-                role=Role.ASSISTANT,
-                content=content,
-                tool_calls=tool_calls,
-            ))
+            messages.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=content,
+                    tool_calls=tool_calls,
+                )
+            )
             for tc in tool_calls:
                 tr = self._executor.execute(tc)
-                messages.append(Message(
-                    role=Role.TOOL,
-                    content=tr.content,
-                    tool_call_id=tc.id,
-                    name=tc.name,
-                ))
+                messages.append(
+                    Message(
+                        role=Role.TOOL,
+                        content=tr.content,
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                    )
+                )
             followup = self._engine.generate(
                 messages,
                 model=self._sub_model,
@@ -298,6 +357,71 @@ class RLMAgent(ToolUsingAgent):
         Called from REPL code via ``llm_batch(prompts)``.
         """
         return [self._make_sub_query(p) for p in prompts]
+
+    def _tool_arg_names(self) -> Dict[str, Optional[str]]:
+        """Build a best-effort primary-arg map for injected tool helpers."""
+        arg_names: Dict[str, Optional[str]] = {}
+        for tool in self._tools:
+            props = tool.spec.parameters.get("properties", {})
+            required = tool.spec.parameters.get("required", [])
+            primary = None
+            if required:
+                primary = required[0]
+            elif props:
+                primary = next(iter(props.keys()))
+            arg_names[tool.spec.name] = primary
+        return arg_names
+
+    def _execute_tool_from_repl(self, tool_name: str, params: Dict[str, Any]) -> str:
+        """Execute a real OpenJarvis tool from within the REPL."""
+        if self._executor is None:
+            raise RuntimeError(f"Tool '{tool_name}' is not available")
+
+        tc = ToolCall(
+            id=f"rlm_tool_{len(getattr(self, '_repl_tool_results', []))}",
+            name=tool_name,
+            arguments=json.dumps(params),
+        )
+        tr = self._executor.execute(tc)
+        getattr(self, "_repl_tool_results", []).append(tr)
+        return tr.content
+
+    def _repl_read_file(self, path: str, max_lines: int = 120) -> str:
+        """Read a bounded number of lines from a file via the real tool."""
+        params: Dict[str, Any] = {"path": path}
+        try:
+            max_lines_int = int(max_lines)
+        except (TypeError, ValueError):
+            max_lines_int = 120
+        if max_lines_int > 0:
+            params["max_lines"] = max_lines_int
+        return self._execute_tool_from_repl("file_read", params)
+
+    def _repl_read_file_chunk(
+        self,
+        path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        """Read a bounded line range from a file via the file_read tool.
+
+        The underlying tool only supports a head-style max_lines cap, so this
+        helper reads up to ``end_line`` and then slices the requested range in
+        Python. This is still much cheaper than asking the model to dump the
+        entire file into the next turn.
+        """
+        try:
+            start = max(1, int(start_line))
+            end = max(start, int(end_line))
+        except (TypeError, ValueError):
+            start, end = 1, 120
+
+        content = self._execute_tool_from_repl(
+            "file_read",
+            {"path": path, "max_lines": end},
+        )
+        lines = content.splitlines(keepends=True)
+        return "".join(lines[start - 1 : end])
 
     # ------------------------------------------------------------------
     # Helpers

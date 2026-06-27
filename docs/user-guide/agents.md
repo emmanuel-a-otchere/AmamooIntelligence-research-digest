@@ -13,6 +13,7 @@ Agents are the agentic logic layer of OpenJarvis. They determine how a query is 
 | `RLMAgent`          | `rlm`             | Yes             | Yes        | Recursive LM with persistent REPL            |
 | `OpenHandsAgent`    | `openhands`       | No              | Yes        | Wraps real openhands-sdk                     |
 | `ClaudeCodeAgent`   | `claude_code`     | No              | Yes        | Claude Agent SDK via Node.js subprocess       |
+| `OpenCodeAgent`     | `opencode`        | No              | Yes        | [opencode](https://opencode.ai) coding agent on your local engine |
 | `OperativeAgent`    | `operative`       | Yes             | Yes        | Persistent scheduled agent with state management |
 | `MonitorOperativeAgent` | `monitor_operative` | Yes        | Yes        | Long-horizon agent with 4 configurable strategy axes |
 
@@ -383,6 +384,64 @@ jarvis ask --agent claude_code "Refactor the tests to use pytest fixtures"
 
 ---
 
+## OpenCodeAgent
+
+The `OpenCodeAgent` delegates coding tasks to [opencode](https://opencode.ai), the open-source coding agent, running it **on your local engine**. opencode handles the agentic loop, file edits, and tool use; OpenJarvis supplies the model — keeping coding-agent work local-first.
+
+!!! warning "Requirements"
+    Requires the `opencode` binary on `PATH` (`npm i -g opencode-ai` or `brew install anomalyco/tap/opencode`). It is **not** bundled; `run()` returns a clear error if it is missing. No `ANTHROPIC_API_KEY` needed — inference goes through your OpenJarvis engine.
+
+**How it works:**
+
+1. Derives an OpenAI-compatible base URL from the `engine` (e.g. Ollama/vLLM/llama.cpp at `<host>/v1`) and writes an `opencode.json` in the workspace registering it as an `@ai-sdk/openai-compatible` provider (`openjarvis/<model>`).
+2. Spawns a headless `opencode serve` (loopback, random port) and waits for `/global/health`.
+3. Creates a session (`POST /session`) and sends the task (`POST /session/{id}/message`) with `model={providerID, modelID}` and the selected `agent` (`build` or `plan`).
+4. Parses the returned message `parts` — text parts → `content`, tool parts → `tool_results` — into an `AgentResult`.
+5. `close()` disposes the session/server.
+
+**Constructor parameters (selected):**
+
+| Parameter           | Type              | Default          | Description                                              |
+|---------------------|-------------------|------------------|----------------------------------------------------------|
+| `engine`            | `InferenceEngine` | --               | Used to derive the local OpenAI-compatible provider URL  |
+| `model`             | `str`             | --               | Model id served at the provider (e.g. `qwen3:8b`)        |
+| `workspace`         | `str`             | `os.getcwd()`    | Directory opencode operates in                           |
+| `agent`             | `str`             | `"build"`        | opencode agent: `build` (full access) or `plan` (read-only) |
+| `provider_base_url` | `str`             | derived          | Override the engine-derived OpenAI base URL              |
+| `provider_id`       | `str`             | `"openjarvis"`   | opencode provider id to register/use                     |
+| `model_id`          | `str`             | `model`          | Model id within the provider                             |
+| `server_password`   | `str`             | `$OPENCODE_SERVER_PASSWORD` | Optional basic-auth for the opencode server   |
+| `timeout`           | `int`             | `600`            | HTTP timeout in seconds                                  |
+
+```python
+from openjarvis.agents.opencode import OpenCodeAgent
+
+agent = OpenCodeAgent(engine, "qwen3:8b", workspace="/path/to/project", agent="build")
+result = agent.run("Add type hints to utils.py and run the tests")
+print(result.content)
+agent.close()
+```
+
+```bash
+# Via CLI (opencode must be installed)
+jarvis ask --agent opencode "Refactor the parser to use a state machine"
+```
+
+!!! tip "Pass-through providers"
+    If the `engine` has no derivable base URL, pass `model` as `provider/model` (e.g. `ollama/llama3`) and opencode resolves it from its own configuration — no `opencode.json` is written.
+
+!!! warning "Model capability matters"
+    opencode's agentic loop (planning + correct tool calls + multi-step
+    follow-through) needs a reasonably capable model. In testing, a **27B**
+    local model (Qwen3.5-27B served via vLLM) solved a 7-task coding suite
+    cleanly (create / edit / bug-fix / implement-to-pass-tests / multi-file,
+    verified by running the code and tests). An **8B** model (qwen3:8b) was
+    unreliable — malformed tool calls, syntactically broken code, and
+    half-finished tasks. Prefer a capable local model (or a cloud model) for
+    real coding work.
+
+---
+
 ## OperativeAgent
 
 The `OperativeAgent` is a persistent, scheduled autonomous agent with built-in session persistence and state recall. Designed for "Operators" -- autonomous agents that run on a schedule with automatic state management between ticks. Extends `ToolUsingAgent`.
@@ -621,3 +680,64 @@ All agents publish events on the `EventBus` when a bus is provided:
     `INFERENCE_START` / `INFERENCE_END` events are published by the `InstrumentedEngine` wrapper, not by agents directly. This keeps telemetry opt-in and transparent to agent code.
 
 These events enable the telemetry and trace systems to record detailed interaction data automatically.
+
+---
+
+## Managed Agent Streaming
+
+The Managed Agent API (`/v1/managed-agents/{id}/messages`) supports **real LLM token streaming** via SSE. Send a message with `stream: true` to receive the model's response tokens as they are generated, rather than waiting for the full response.
+
+### How It Works
+
+The streaming endpoint calls `engine.stream_full()` directly, which yields `StreamChunk` objects containing content tokens, tool-call fragments, and finish reasons. This provides genuine token-by-token streaming from the LLM -- not a post-hoc word replay.
+
+For multi-turn tool-calling agents, the streaming loop automatically:
+
+1. Yields content tokens to the client as they arrive.
+2. Accumulates tool-call fragments (OpenAI sends these incrementally).
+3. Executes tools when `finish_reason="tool_calls"` is received.
+4. Emits tool results as named SSE events (`event: tool_result`).
+5. Feeds results back to the LLM for the next turn.
+6. Repeats until the model produces a final text response or `max_turns` is reached.
+
+### Streaming Messages
+
+```bash
+curl -N -X POST http://localhost:8000/v1/managed-agents/{id}/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content": "What is 2+2?", "stream": true}'
+```
+
+The response follows the OpenAI SSE format:
+
+1. **Content chunks** -- `data: {"choices": [{"delta": {"content": "token"}}]}`
+2. **Tool calls** (if the model requests tool use) -- `event: tool_calls\ndata: {"calls": [{"tool_name": "...", "arguments": "..."}]}`
+3. **Tool results** -- `event: tool_result\ndata: {"tool_name": "...", "output": "..."}`
+4. **Final chunk** -- `data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}`
+5. **Done sentinel** -- `data: [DONE]`
+
+When `stream: false` (the default), the endpoint behaves exactly as before -- the message is queued and the agent must be triggered separately via `/run`.
+
+### Behavior Details
+
+- The user message is always stored in the database before streaming starts.
+- After streaming completes, the full collected response is persisted as an `agent_to_user` message.
+- Conversation history from prior messages is automatically loaded as LLM context.
+- The engine's `stream_full()` method is used for real token streaming. Engines that do not override it fall back to the default implementation which wraps the plain `stream()` method.
+- If the engine is not available on the server, a `503` error is returned.
+- Tool execution during streaming uses the `ToolRegistry` to find and instantiate tools.
+
+### Python Example
+
+```python
+import httpx
+
+with httpx.stream(
+    "POST",
+    "http://localhost:8000/v1/managed-agents/{id}/messages",
+    json={"content": "Summarize today's news", "stream": True},
+) as response:
+    for line in response.iter_lines():
+        if line.startswith("data:") and "[DONE]" not in line:
+            print(line[5:].strip())
+```

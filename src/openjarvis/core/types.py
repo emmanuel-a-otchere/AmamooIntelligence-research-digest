@@ -68,6 +68,10 @@ class Message:
     tool_calls: Optional[List[ToolCall]] = None
     tool_call_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Base64-encoded image data for vision-capable models (e.g. gemma3,
+    # qwen2.5-vl). Forwarded to Ollama's /api/chat "images" field; None or
+    # empty for text-only messages (the common case).
+    images: Optional[List[str]] = None
 
 
 @dataclass(slots=True)
@@ -125,6 +129,16 @@ class ToolResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+# Bump when token-counting methodology changes so the leaderboard can
+# distinguish entries computed under different rules.
+#   v1 = original (Ollama prompt_eval_count, may under-count due to KV cache)
+#   v2 = full prompt token count, no KV-cache assumption, system prompt
+#        always counted
+# Lives here (not in server/savings) so the telemetry layer can read it
+# without crossing the server → telemetry layering.
+TOKEN_COUNTING_VERSION: int = 2
+
+
 @dataclass(slots=True)
 class TelemetryRecord:
     """Single telemetry observation recorded after an inference call."""
@@ -132,6 +146,7 @@ class TelemetryRecord:
     timestamp: float
     model_id: str
     prompt_tokens: int = 0
+    prompt_tokens_evaluated: int = 0  # KV-cache-aware: actual tokens processed
     completion_tokens: int = 0
     total_tokens: int = 0
     latency_seconds: float = 0.0
@@ -166,6 +181,15 @@ class TelemetryRecord:
     gpu_energy_joules: float = 0.0
     dram_energy_joules: float = 0.0
     tokens_per_joule: float = 0.0
+    # Version tag for the token-counting methodology used when this record
+    # was produced. `None` (= legacy) means the record predates per-record
+    # versioning; the leaderboard aggregator filters those out to avoid
+    # mixing pre-fix and post-fix records in the same per-token efficiency
+    # metric — they were the dominant source of the bimodal Wh/token
+    # distribution on the public leaderboard. New records always write
+    # `TOKEN_COUNTING_VERSION` from `server/savings.py`.
+    token_counting_version: Optional[int] = None
+    mining_session_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -176,6 +200,21 @@ class TelemetryRecord:
 
 def _trace_id() -> str:
     return uuid.uuid4().hex[:16]
+
+
+def _message_to_dict(msg: "Message") -> Dict[str, Any]:
+    """Serialize a Message to a JSON-safe dict."""
+    d: Dict[str, Any] = {"role": msg.role.value, "content": msg.content}
+    if msg.name:
+        d["name"] = msg.name
+    if msg.tool_calls:
+        d["tool_calls"] = [
+            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+            for tc in msg.tool_calls
+        ]
+    if msg.tool_call_id:
+        d["tool_call_id"] = msg.tool_call_id
+    return d
 
 
 @dataclass(slots=True)
@@ -219,6 +258,7 @@ class Trace:
     total_tokens: int = 0
     total_latency_seconds: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
 
     def add_step(self, step: TraceStep) -> None:
         """Append a step and update running totals."""
@@ -235,8 +275,11 @@ class RoutingContext:
     query_length: int = 0
     has_code: bool = False
     has_math: bool = False
+    has_reasoning: bool = False
     language: str = "en"
     urgency: float = 0.5
+    complexity_score: float = 0.0  # 0.0 (trivial) to 1.0 (very complex)
+    suggested_max_tokens: int = 1024
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -253,4 +296,5 @@ __all__ = [
     "ToolResult",
     "Trace",
     "TraceStep",
+    "_message_to_dict",
 ]

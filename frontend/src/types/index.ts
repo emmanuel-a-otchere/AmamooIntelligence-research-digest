@@ -56,6 +56,63 @@ export interface MessageTelemetry {
   tokens_per_sec?: number;
   ttft_ms?: number;
   total_ms?: number;
+  complexity_score?: number;
+  complexity_tier?: string;
+  suggested_max_tokens?: number;
+}
+
+export interface TimeRange {
+  start?: string;
+  end?: string;
+}
+
+export interface ResearchSource {
+  ref: number;
+  title?: string;
+  sender?: string;
+  date?: string;
+  url?: string;
+}
+
+export interface ResearchSearchTrace {
+  id: string;
+  query: string;
+  person?: string;
+  timeRange?: TimeRange | string;
+  status: 'pending' | 'complete';
+  numHits?: number;
+  topTitles?: string[];
+}
+
+export type ResearchEvent =
+  | {
+      type: 'search_call';
+      arguments: {
+        query: string;
+        person?: string;
+        time_range?: TimeRange | string;
+      };
+    }
+  | {
+      type: 'search_result';
+      num_hits: number;
+      top_titles?: string[];
+      sources?: ResearchSource[];
+    }
+  | { type: 'synthesis'; text: string }
+  | {
+      type: 'system_metrics';
+      power_w: number;
+      energy_j: number;
+      duration_s: number;
+    }
+  | { type: 'done'; usage?: TokenUsage }
+  | { type: 'error'; message: string };
+
+export interface LiveEnergyMetrics {
+  power_w: number;
+  energy_j: number;
+  duration_s: number;
 }
 
 export interface ChatMessage {
@@ -64,8 +121,12 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   toolCalls?: ToolCallInfo[];
+  researchTraces?: ResearchSearchTrace[];
+  researchSources?: ResearchSource[];
+  isResearch?: boolean;
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
+  audio?: { url: string };
 }
 
 export interface Conversation {
@@ -120,6 +181,7 @@ export interface SavingsData {
   total_tokens: number;
   local_cost: number;
   per_provider: ProviderSavings[];
+  token_counting_version?: number;
 }
 
 export interface ServerInfo {

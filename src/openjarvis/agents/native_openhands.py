@@ -12,6 +12,10 @@ import re
 from typing import Any, List, Optional
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
+from openjarvis.agents.prompt_loader import (
+    load_few_shot_exemplars,
+    load_system_prompt_override,
+)
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
 from openjarvis.core.types import Message, Role, ToolCall, ToolResult
@@ -54,6 +58,9 @@ class NativeOpenHandsAgent(ToolUsingAgent):
     """Native CodeAct agent -- generates and executes Python code."""
 
     agent_id = "native_openhands"
+    _default_temperature = 0.7
+    _default_max_tokens = 2048
+    _default_max_turns = 3
 
     def __init__(
         self,
@@ -62,17 +69,22 @@ class NativeOpenHandsAgent(ToolUsingAgent):
         *,
         tools: Optional[List[BaseTool]] = None,
         bus: Optional[EventBus] = None,
-        max_turns: int = 3,
-        temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_turns: Optional[int] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         interactive: bool = False,
         confirm_callback=None,
     ) -> None:
         super().__init__(
-            engine, model, tools=tools, bus=bus,
-            max_turns=max_turns, temperature=temperature,
+            engine,
+            model,
+            tools=tools,
+            bus=bus,
+            max_turns=max_turns,
+            temperature=temperature,
             max_tokens=max_tokens,
-            interactive=interactive, confirm_callback=confirm_callback,
+            interactive=interactive,
+            confirm_callback=confirm_callback,
         )
 
     @staticmethod
@@ -93,9 +105,7 @@ class NativeOpenHandsAgent(ToolUsingAgent):
             content = WebSearchTool._fetch_url(url, max_chars=4000)
             header = f"\n\n--- Content from {url} ---\n"
             footer = "\n--- End of content ---\n"
-            expanded = text.replace(
-                url, f"{header}{content}{footer}"
-            )
+            expanded = text.replace(url, f"{header}{content}{footer}")
             return expanded, True
         except Exception:
             return text, False
@@ -121,9 +131,7 @@ class NativeOpenHandsAgent(ToolUsingAgent):
                     messages[i] = Message(
                         role=Role.USER,
                         content=(
-                            truncated
-                            + "\n\n[Input truncated"
-                            " to fit context window]"
+                            truncated + "\n\n[Input truncated to fit context window]"
                         ),
                     )
                 break
@@ -135,7 +143,9 @@ class NativeOpenHandsAgent(ToolUsingAgent):
         # Remove Action: ... Action Input: ... blocks
         text = re.sub(
             r"Action:\s*.+?(?:Action Input:\s*.+?)?(?=\n\n|\Z)",
-            "", text, flags=re.DOTALL | re.IGNORECASE,
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
         )
         # Remove <tool_call>...</tool_call> or </tool_name> blocks
         text = re.sub(r"<tool_call>.*?</\w+>", "", text, flags=re.DOTALL)
@@ -214,7 +224,10 @@ class NativeOpenHandsAgent(ToolUsingAgent):
         self._emit_turn_start(input)
 
         tool_descriptions = build_tool_descriptions(self._tools)
-        system_prompt = OPENHANDS_SYSTEM_PROMPT.format(
+        prompt_template = (
+            load_system_prompt_override("native_openhands") or OPENHANDS_SYSTEM_PROMPT
+        )
+        system_prompt = prompt_template.format(
             tool_descriptions=tool_descriptions,
         )
 
@@ -238,39 +251,35 @@ class NativeOpenHandsAgent(ToolUsingAgent):
             direct_messages = self._truncate_if_needed(direct_messages)
             try:
                 result = self._generate(direct_messages)
-                content = self._strip_think_tags(result.get("content", ""))
-                usage = result.get("usage", {})
-                self._emit_turn_end(turns=1)
-                return AgentResult(
-                    content=content, tool_results=[], turns=1,
-                    metadata={
-                        "prompt_tokens": usage.get("prompt_tokens", 0),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
-                    },
-                )
-            except Exception as exc:
-                error_str = str(exc)
-                if "400" in error_str:
-                    error_msg = (
-                        "The input is too long for the "
-                        "model's context window. "
-                        "Please try a shorter message."
-                    )
-                else:
-                    error_msg = (
-                        "The model returned an error: "
-                        + error_str
-                    )
+            except Exception:
+                # Propagate to the eval runner / server bridge so the failure
+                # is recorded as an error instead of a fake "input too long"
+                # answer that silently scores as 0%. Telemetry boundary is
+                # still emitted before re-raising.
                 self._emit_turn_end(turns=1, error=True)
-                return AgentResult(
-                    content=error_msg,
-                    tool_results=[],
-                    turns=1,
-                    metadata={"error": True},
-                )
+                raise
+            content = self._strip_think_tags(result.get("content", ""))
+            usage = result.get("usage", {})
+            self._emit_turn_end(turns=1)
+            return AgentResult(
+                content=content,
+                tool_results=[],
+                turns=1,
+                metadata={
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0),
+                },
+            )
 
         messages = self._build_messages(input, context, system_prompt=system_prompt)
+
+        # Inject few-shot exemplars before the user input
+        for ex in load_few_shot_exemplars("native_openhands"):
+            if ex.get("input") and ex.get("output"):
+                messages.insert(-1, Message(role=Role.USER, content=ex["input"]))
+                messages.insert(-1, Message(role=Role.ASSISTANT, content=ex["output"]))
+
         messages = self._truncate_if_needed(messages)
 
         all_tool_results: list[ToolResult] = []
@@ -278,30 +287,28 @@ class NativeOpenHandsAgent(ToolUsingAgent):
         last_content = ""
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+        # Build OpenAI-format tool schemas for native function calling
+        openai_tools = self._executor.get_openai_tools() if self._tools else []
+        # Side dict for Gemini thought_signatures (ToolCall uses slots)
+        _thought_sigs: dict[str, bytes] = {}
+
         for _turn in range(self._max_turns):
             turns += 1
             # Truncate before every generate call -- tool results may have
             # expanded the context beyond what the model supports.
             messages = self._truncate_if_needed(messages)
 
+            gen_kwargs: dict[str, Any] = {}
+            if openai_tools:
+                gen_kwargs["tools"] = openai_tools
+
             try:
-                result = self._generate(messages)
-            except Exception as exc:
-                error_str = str(exc)
-                if "400" in error_str:
-                    error_msg = (
-                        "The input is too long for the model's context window. "
-                        "Please try a shorter message."
-                    )
-                else:
-                    error_msg = f"The model returned an error: {error_str}"
+                result = self._generate(messages, **gen_kwargs)
+            except Exception:
+                # Propagate so the eval runner records a real error rather
+                # than a fake "input too long" string that silently scores 0.
                 self._emit_turn_end(turns=turns, error=True)
-                return AgentResult(
-                    content=error_msg,
-                    tool_results=all_tool_results,
-                    turns=turns,
-                    metadata={"error": True},
-                )
+                raise
 
             # Accumulate usage from this generate call
             usage = result.get("usage", {})
@@ -312,6 +319,46 @@ class NativeOpenHandsAgent(ToolUsingAgent):
             # Strip think tags so they don't interfere with parsing
             content = self._strip_think_tags(content)
             last_content = content
+
+            # --- Native function-calling path (OpenAI, Anthropic, etc.) ---
+            raw_tool_calls = result.get("tool_calls", [])
+            if raw_tool_calls:
+                native_calls = []
+                for i, tc in enumerate(raw_tool_calls):
+                    call = ToolCall(
+                        id=tc.get("id", f"call_{turns}_{i}"),
+                        name=tc.get("name", ""),
+                        arguments=tc.get("arguments", "{}"),
+                    )
+                    # Preserve thought_signature for Gemini reasoning
+                    sig = tc.get("thought_signature")
+                    if sig is not None:
+                        _thought_sigs[call.id] = sig
+                    native_calls.append(call)
+                messages.append(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content=content,
+                        tool_calls=native_calls,
+                    )
+                )
+                for tc in native_calls:
+                    tool_result = self._executor.execute(tc)
+                    all_tool_results.append(tool_result)
+                    obs_text = tool_result.content
+                    if len(obs_text) > 4000:
+                        obs_text = obs_text[:4000] + "\n\n[Output truncated]"
+                    messages.append(
+                        Message(
+                            role=Role.TOOL,
+                            content=obs_text,
+                            tool_call_id=tc.id,
+                            name=tc.name,
+                        )
+                    )
+                continue
+
+            # --- Text-based fallback (CodeAct / Action-Input format) ---
 
             # Try to extract code
             code = self._extract_code(content)
@@ -358,7 +405,9 @@ class NativeOpenHandsAgent(ToolUsingAgent):
             content = self._strip_tool_call_text(content)
             self._emit_turn_end(turns=turns)
             return AgentResult(
-                content=content, tool_results=all_tool_results, turns=turns,
+                content=content,
+                tool_results=all_tool_results,
+                turns=turns,
                 metadata=total_usage,
             )
 

@@ -34,8 +34,36 @@ def messages_to_dicts(messages: Sequence[Message]) -> List[Dict[str, Any]]:
             ]
         if m.tool_call_id:
             d["tool_call_id"] = m.tool_call_id
+        # Vision: forward base64 images to the engine. Ollama's /api/chat
+        # accepts an "images" array on a message; text messages skip this.
+        if getattr(m, "images", None):
+            d["images"] = list(m.images)
         out.append(d)
     return out
 
 
-__all__ = ["EngineConnectionError", "InferenceEngine", "messages_to_dicts"]
+def estimate_prompt_tokens(messages: Sequence[Message]) -> int:
+    """Estimate full prompt token count from message content.
+
+    Ollama's ``prompt_eval_count`` may report only *newly evaluated*
+    tokens when KV-cache hits occur, under-counting the system prompt
+    and earlier conversation turns.  This helper provides a
+    cache-agnostic estimate so that downstream cost / FLOPs / energy
+    calculations reflect the true prompt size — matching what a cloud
+    provider would charge.
+
+    Uses ~4 characters per token (standard BPE average for English) plus
+    a small per-message overhead for role markers and separators.
+    """
+    total_chars = sum(len(m.content) for m in messages)
+    # ~4 tokens overhead per message for role markers / separators
+    overhead = len(messages) * 4
+    return max(1, total_chars // 4 + overhead)
+
+
+__all__ = [
+    "EngineConnectionError",
+    "InferenceEngine",
+    "estimate_prompt_tokens",
+    "messages_to_dicts",
+]

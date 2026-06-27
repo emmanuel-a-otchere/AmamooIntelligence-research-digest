@@ -71,11 +71,14 @@ class TestTelemetryAggregator:
         agg.close()
 
     def test_multiple_models_grouped(self, tmp_path: Path) -> None:
-        agg = _setup(tmp_path, [
-            _make_record(model_id="m1"),
-            _make_record(model_id="m1"),
-            _make_record(model_id="m2"),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(model_id="m1"),
+                _make_record(model_id="m1"),
+                _make_record(model_id="m2"),
+            ],
+        )
         stats = agg.per_model_stats()
         assert len(stats) == 2
         # Ordered by call_count DESC
@@ -86,11 +89,14 @@ class TestTelemetryAggregator:
         agg.close()
 
     def test_per_engine_stats(self, tmp_path: Path) -> None:
-        agg = _setup(tmp_path, [
-            _make_record(engine="ollama"),
-            _make_record(engine="vllm"),
-            _make_record(engine="vllm"),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(engine="ollama"),
+                _make_record(engine="vllm"),
+                _make_record(engine="vllm"),
+            ],
+        )
         stats = agg.per_engine_stats()
         assert len(stats) == 2
         assert stats[0].engine == "vllm"
@@ -105,22 +111,28 @@ class TestTelemetryAggregator:
         agg.close()
 
     def test_top_models_ordering(self, tmp_path: Path) -> None:
-        agg = _setup(tmp_path, [
-            _make_record(model_id="rare"),
-            _make_record(model_id="popular"),
-            _make_record(model_id="popular"),
-            _make_record(model_id="popular"),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(model_id="rare"),
+                _make_record(model_id="popular"),
+                _make_record(model_id="popular"),
+                _make_record(model_id="popular"),
+            ],
+        )
         top = agg.top_models(n=2)
         assert top[0].model_id == "popular"
         assert top[0].call_count == 3
         agg.close()
 
     def test_summary_totals(self, tmp_path: Path) -> None:
-        agg = _setup(tmp_path, [
-            _make_record(prompt_tokens=10, completion_tokens=5, cost=0.001),
-            _make_record(prompt_tokens=20, completion_tokens=10, cost=0.002),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(prompt_tokens=10, completion_tokens=5, cost=0.001),
+                _make_record(prompt_tokens=20, completion_tokens=10, cost=0.002),
+            ],
+        )
         s = agg.summary()
         assert s.total_calls == 2
         assert s.total_tokens == 45  # (10+5) + (20+10)
@@ -136,11 +148,14 @@ class TestTelemetryAggregator:
 
     def test_time_range_since(self, tmp_path: Path) -> None:
         now = time.time()
-        agg = _setup(tmp_path, [
-            _make_record(ts=now - 100),
-            _make_record(ts=now - 10),
-            _make_record(ts=now),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(ts=now - 100),
+                _make_record(ts=now - 10),
+                _make_record(ts=now),
+            ],
+        )
         stats = agg.per_model_stats(since=now - 50)
         total = sum(s.call_count for s in stats)
         assert total == 2
@@ -148,10 +163,13 @@ class TestTelemetryAggregator:
 
     def test_time_range_until(self, tmp_path: Path) -> None:
         now = time.time()
-        agg = _setup(tmp_path, [
-            _make_record(ts=now - 100),
-            _make_record(ts=now),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(ts=now - 100),
+                _make_record(ts=now),
+            ],
+        )
         stats = agg.per_model_stats(until=now - 50)
         total = sum(s.call_count for s in stats)
         assert total == 1
@@ -159,11 +177,14 @@ class TestTelemetryAggregator:
 
     def test_time_range_since_and_until(self, tmp_path: Path) -> None:
         now = time.time()
-        agg = _setup(tmp_path, [
-            _make_record(ts=now - 200),
-            _make_record(ts=now - 100),
-            _make_record(ts=now),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(ts=now - 200),
+                _make_record(ts=now - 100),
+                _make_record(ts=now),
+            ],
+        )
         stats = agg.per_model_stats(since=now - 150, until=now - 50)
         total = sum(s.call_count for s in stats)
         assert total == 1
@@ -178,10 +199,13 @@ class TestTelemetryAggregator:
 
     def test_export_records_filtered(self, tmp_path: Path) -> None:
         now = time.time()
-        agg = _setup(tmp_path, [
-            _make_record(ts=now - 100),
-            _make_record(ts=now),
-        ])
+        agg = _setup(
+            tmp_path,
+            [
+                _make_record(ts=now - 100),
+                _make_record(ts=now),
+            ],
+        )
         records = agg.export_records(since=now - 50)
         assert len(records) == 1
         agg.close()
@@ -224,3 +248,61 @@ class TestDataclassDefaults:
         assert a.total_calls == 0
         assert a.per_model == []
         assert a.per_engine == []
+
+
+# ---------------------------------------------------------------------------
+# Token-counting-version filter (leaderboard correctness)
+# ---------------------------------------------------------------------------
+
+
+class TestMethodologyFilter:
+    """When the aggregator is asked to honour the methodology version
+    (the leaderboard ingest path does), legacy rows that predate the
+    per-record version stamp must be excluded — they were the dominant
+    source of the bimodal Wh/token distribution on the public
+    leaderboard. Local dashboard callers leave the flag off so they
+    still see the full history."""
+
+    def test_default_includes_legacy_rows(self, tmp_path: Path) -> None:
+        from openjarvis.core.types import TOKEN_COUNTING_VERSION
+
+        legacy = _make_record(model_id="m1")
+        legacy.token_counting_version = None  # pre-fix row
+        current = _make_record(model_id="m1")
+        current.token_counting_version = TOKEN_COUNTING_VERSION
+
+        agg = _setup(tmp_path, [legacy, current])
+        stats = agg.per_model_stats()  # default: include everything
+        assert len(stats) == 1
+        assert stats[0].call_count == 2
+        agg.close()
+
+    def test_methodology_filter_drops_legacy_rows(self, tmp_path: Path) -> None:
+        from openjarvis.core.types import TOKEN_COUNTING_VERSION
+
+        legacy = _make_record(model_id="m1")
+        legacy.token_counting_version = None
+        current = _make_record(model_id="m1")
+        current.token_counting_version = TOKEN_COUNTING_VERSION
+
+        agg = _setup(tmp_path, [legacy, current])
+        stats = agg.per_model_stats(current_methodology_only=True)
+        assert len(stats) == 1
+        # Only the current-version row counts toward the leaderboard sum.
+        assert stats[0].call_count == 1
+        agg.close()
+
+    def test_methodology_filter_drops_legacy_in_summary(self, tmp_path: Path) -> None:
+        from openjarvis.core.types import TOKEN_COUNTING_VERSION
+
+        legacy = _make_record(model_id="m1", completion_tokens=99)
+        legacy.token_counting_version = None
+        current = _make_record(model_id="m1", completion_tokens=7)
+        current.token_counting_version = TOKEN_COUNTING_VERSION
+
+        agg = _setup(tmp_path, [legacy, current])
+        summary = agg.summary(current_methodology_only=True)
+        # 99-token legacy row excluded; only the 7-completion-token current
+        # row contributes to total_tokens.
+        assert sum(m.completion_tokens for m in summary.per_model) == 7
+        agg.close()

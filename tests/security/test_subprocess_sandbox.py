@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 
+from openjarvis.core import get_python_executable
 from openjarvis.security.subprocess_sandbox import (
     build_safe_env,
     kill_process_tree,
@@ -21,8 +23,16 @@ class TestBuildSafeEnv:
         env = build_safe_env()
         # All keys should be from the safe set
         safe_keys = {
-            "PATH", "HOME", "USER", "LANG", "TERM", "SHELL",
-            "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
+            "PATH",
+            "HOME",
+            "USER",
+            "LANG",
+            "TERM",
+            "SHELL",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TMPDIR",
+            "TZ",
         }
         for key in env:
             assert key in safe_keys
@@ -78,7 +88,8 @@ class TestRunSandboxed:
         os.environ["TEST_SECRET"] = "super_secret_value"
         try:
             result = run_sandboxed(
-                'echo "val=$TEST_SECRET"', timeout=10.0,
+                'echo "val=$TEST_SECRET"',
+                timeout=10.0,
             )
             assert result.returncode == 0
             assert "super_secret_value" not in result.stdout
@@ -88,7 +99,7 @@ class TestRunSandboxed:
     def test_output_truncation(self) -> None:
         # Generate output larger than max_output_bytes
         result = run_sandboxed(
-            "python3 -c \"print('A' * 200)\"",
+            f"{shlex.quote(get_python_executable())} -c \"print('A' * 200)\"",
             timeout=10.0,
             max_output_bytes=50,
         )

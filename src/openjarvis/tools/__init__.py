@@ -73,7 +73,72 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.docker_shell_exec  # noqa: F401
     import openjarvis.tools.shell_exec  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.memory_manage  # noqa: F401
+except ImportError:
+    pass
+try:
+    import openjarvis.tools.user_profile_manage  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.skill_manage  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.file_write  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.apply_patch  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.git_tool  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.db_query  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.pdf_tool  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.image_tool  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.audio_tool  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.knowledge_tools  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.text_to_speech  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.digest_collect  # noqa: F401
 except ImportError:
     pass
 

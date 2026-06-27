@@ -84,7 +84,9 @@ class TestVLLMGenerate:
             return_value=httpx.Response(
                 200,
                 json=_openai_response(
-                    content="", model=model_id, tool_calls=tool_calls,
+                    content="",
+                    model=model_id,
+                    tool_calls=tool_calls,
                 ),
             )
         )
@@ -112,9 +114,7 @@ class TestVLLMGenerate:
                 200, json=_openai_response(content="Fallback reply", model=model_id)
             )
 
-        respx_mock.post(f"{VLLM_HOST}/v1/chat/completions").mock(
-            side_effect=handler
-        )
+        respx_mock.post(f"{VLLM_HOST}/v1/chat/completions").mock(side_effect=handler)
         result = engine.generate(
             [Message(role=Role.USER, content="Hello")],
             model=model_id,
@@ -144,6 +144,7 @@ class TestVLLMGenerate:
             return tokens
 
         import asyncio
+
         tokens = asyncio.run(collect())
         assert tokens == ["Hello", " world"]
 
@@ -203,10 +204,14 @@ class TestVLLMErrors:
         respx_mock.post(f"{VLLM_HOST}/v1/chat/completions").mock(
             return_value=httpx.Response(404, json={"error": "model not found"})
         )
-        with pytest.raises(httpx.HTTPStatusError):
+        # The OpenAI-compatible engine wraps upstream HTTP errors (incl. 404)
+        # in EngineConnectionError with an actionable message (see #463); the
+        # raw httpx.HTTPStatusError is the chained cause.
+        with pytest.raises(EngineConnectionError) as exc_info:
             engine.generate(
                 [Message(role=Role.USER, content="Hi")], model="nonexistent"
             )
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
 
     def test_timeout_raises_connection_error(self) -> None:
         engine = _make_engine()

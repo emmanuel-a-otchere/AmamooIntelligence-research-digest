@@ -17,25 +17,27 @@ from openjarvis.evals.core.trace import QueryTrace, TurnTrace
 def _make_traces(n=3):
     traces = []
     for i in range(n):
-        traces.append(QueryTrace(
-            query_id=f"q{i:04d}",
-            workload_type="test",
-            query_text=f"Question {i}",
-            response_text=f"Answer {i}",
-            turns=[
-                TurnTrace(
-                    turn_index=0,
-                    input_tokens=100 + i * 10,
-                    output_tokens=50 + i * 5,
-                    wall_clock_s=1.0 + i * 0.5,
-                    gpu_energy_joules=5.0 + i,
-                    cost_usd=0.01,
-                ),
-            ],
-            total_wall_clock_s=1.0 + i * 0.5,
-            completed=True,
-            is_resolved=i % 2 == 0,
-        ))
+        traces.append(
+            QueryTrace(
+                query_id=f"q{i:04d}",
+                workload_type="test",
+                query_text=f"Question {i}",
+                response_text=f"Answer {i}",
+                turns=[
+                    TurnTrace(
+                        turn_index=0,
+                        input_tokens=100 + i * 10,
+                        output_tokens=50 + i * 5,
+                        wall_clock_s=1.0 + i * 0.5,
+                        gpu_energy_joules=5.0 + i,
+                        cost_usd=0.01,
+                    ),
+                ],
+                total_wall_clock_s=1.0 + i * 0.5,
+                completed=True,
+                is_resolved=i % 2 == 0,
+            )
+        )
     return traces
 
 
@@ -89,11 +91,20 @@ class TestExportSummaryJson:
         summary = json.loads(path.read_text())
         stats = summary["statistics"]
         expected_stat_keys = {
-            "wall_clock_s", "gpu_energy_joules", "cpu_energy_joules",
-            "gpu_power_watts", "cpu_power_watts",
-            "input_tokens", "output_tokens", "total_tokens",
-            "throughput_tokens_per_sec", "energy_per_token_joules",
-            "cost_usd", "turns", "tool_calls", "mbu_avg_pct",
+            "wall_clock_s",
+            "gpu_energy_joules",
+            "cpu_energy_joules",
+            "gpu_power_watts",
+            "cpu_power_watts",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "throughput_tokens_per_sec",
+            "energy_per_token_joules",
+            "cost_usd",
+            "turns",
+            "tool_calls",
+            "mbu_avg_pct",
         }
         assert set(stats.keys()) == expected_stat_keys
 
@@ -114,6 +125,84 @@ class TestExportSummaryJson:
         export_summary_json([], {}, path)
         summary = json.loads(path.read_text())
         assert summary["totals"]["queries"] == 0
+
+
+class TestHarnessErrorExclusion:
+    """Harness errors must never count as model misses in resolve-rate."""
+
+    def _traces(self):
+        return [
+            QueryTrace(
+                query_id="q0000",
+                workload_type="agentic",
+                completed=True,
+                is_resolved=True,
+                turns=[TurnTrace(turn_index=0, input_tokens=10, output_tokens=5)],
+            ),
+            QueryTrace(
+                query_id="q0001",
+                workload_type="agentic",
+                completed=True,
+                is_resolved=False,  # genuine model miss: stays in denominator
+                turns=[TurnTrace(turn_index=0, input_tokens=10, output_tokens=5)],
+            ),
+            QueryTrace(
+                query_id="q0002",
+                workload_type="agentic",
+                completed=False,
+                is_resolved=False,  # stamped by run_tests despite zero contact
+                error="zero_model_requests: the agent never contacted the model",
+                error_kind="harness_error",
+            ),
+        ]
+
+    def test_summary_excludes_harness_errors_from_accuracy(self, tmp_path):
+        path = tmp_path / "summary.json"
+        export_summary_json(self._traces(), {"model": "m"}, path)
+        summary = json.loads(path.read_text())
+
+        totals = summary["totals"]
+        assert totals["harness_errors"] == 1
+        assert totals["resolved"] == 1
+        assert totals["unresolved"] == 1  # NOT 2: harness error excluded
+        assert totals["accuracy"] == 0.5  # NOT 1/3
+        # Flat table_gen metrics exclude the harness error too.
+        assert summary["metrics"]["accuracy"]["n"] == 2
+        assert summary["metrics"]["accuracy"]["mean"] == 0.5
+        # Details surfaced for diagnosis.
+        details = summary["harness_error_details"]
+        assert details[0]["query_id"] == "q0002"
+        assert "zero_model_requests" in details[0]["error"]
+
+    def test_efficiency_excludes_harness_errors(self):
+        result = _compute_efficiency(self._traces(), None, None)
+        assert result["accuracy"] == 0.5
+
+    def test_no_harness_errors_key_absent(self, tmp_path):
+        path = tmp_path / "summary.json"
+        export_summary_json(_make_traces(), {}, path)
+        summary = json.loads(path.read_text())
+        assert summary["totals"]["harness_errors"] == 0
+        assert "harness_error_details" not in summary
+
+
+class TestTraceErrorFieldRoundTrip:
+    def test_round_trip_preserves_error_fields(self):
+        trace = QueryTrace(
+            query_id="q0",
+            workload_type="agentic",
+            error="zero_model_requests: ...",
+            error_kind="harness_error",
+        )
+        restored = QueryTrace.from_dict(trace.to_dict())
+        assert restored.error == trace.error
+        assert restored.error_kind == "harness_error"
+
+    def test_old_trace_dicts_still_load(self):
+        """Backward compat: traces.jsonl written before the schema change."""
+        restored = QueryTrace.from_dict({"query_id": "q0", "workload_type": "agentic"})
+        assert restored.error is None
+        assert restored.error_kind is None
 
 
 class TestExportArtifactsManifest:
@@ -152,8 +241,10 @@ class TestComputeEfficiency:
     def test_no_scored_traces(self):
         traces = [
             QueryTrace(
-                query_id="q0", workload_type="test",
-                completed=True, is_resolved=None,
+                query_id="q0",
+                workload_type="test",
+                completed=True,
+                is_resolved=None,
             ),
         ]
         result = _compute_efficiency(traces, 5.0, 1.0)
@@ -169,8 +260,10 @@ class TestComputeEfficiency:
     def test_with_gpu_power(self):
         traces = [
             QueryTrace(
-                query_id="q0", workload_type="test",
-                completed=True, is_resolved=True,
+                query_id="q0",
+                workload_type="test",
+                completed=True,
+                is_resolved=True,
                 query_gpu_power_avg_watts=100.0,
             ),
         ]
@@ -351,35 +444,37 @@ class TestActionEnergyBreakdown:
     def test_action_energy_summary_in_export(self, tmp_path):
         traces = []
         for i in range(2):
-            traces.append(QueryTrace(
-                query_id=f"q{i:04d}",
-                workload_type="test",
-                turns=[
-                    TurnTrace(
-                        turn_index=0,
-                        input_tokens=100,
-                        output_tokens=50,
-                        wall_clock_s=2.0,
-                        gpu_energy_joules=5.0,
-                        action_energy_breakdown=[
-                            {
-                                "action_type": "lm_inference",
-                                "duration_s": 1.5,
-                                "gpu_energy_joules": 4.0,
-                                "cpu_energy_joules": 0.3,
-                            },
-                            {
-                                "action_type": "tool_call:search",
-                                "duration_s": 0.5,
-                                "gpu_energy_joules": 1.0,
-                                "cpu_energy_joules": 0.1,
-                            },
-                        ],
-                    ),
-                ],
-                total_wall_clock_s=2.0,
-                completed=True,
-            ))
+            traces.append(
+                QueryTrace(
+                    query_id=f"q{i:04d}",
+                    workload_type="test",
+                    turns=[
+                        TurnTrace(
+                            turn_index=0,
+                            input_tokens=100,
+                            output_tokens=50,
+                            wall_clock_s=2.0,
+                            gpu_energy_joules=5.0,
+                            action_energy_breakdown=[
+                                {
+                                    "action_type": "lm_inference",
+                                    "duration_s": 1.5,
+                                    "gpu_energy_joules": 4.0,
+                                    "cpu_energy_joules": 0.3,
+                                },
+                                {
+                                    "action_type": "tool_call:search",
+                                    "duration_s": 0.5,
+                                    "gpu_energy_joules": 1.0,
+                                    "cpu_energy_joules": 0.1,
+                                },
+                            ],
+                        ),
+                    ],
+                    total_wall_clock_s=2.0,
+                    completed=True,
+                )
+            )
         path = tmp_path / "summary.json"
         export_summary_json(traces, {}, path)
         summary = json.loads(path.read_text())
