@@ -16,15 +16,24 @@ on:
         required: false
         default: "false"
 
-permissions:
-  contents: write
-  pull-requests: write
-  # NB: there is no `workflows` key in the workflow-permissions grammar —
-  # setting it makes GitHub reject the YAML at parse time. Instead, this
-  # repo's default workflow permission is set to "Read and write" via
-  # Settings → Actions → General → Workflow permissions, which is what
-  # allows this sync to push modified workflow files (e.g. autotag.yml)
-  # from upstream without rejection.
+# Permissions intentionally omitted from this workflow file.
+#
+# GitHub Actions' workflow 'permissions:' block does NOT accept a 'workflows'
+# key — adding one makes GitHub reject the YAML at parse time and refuse to
+# run the workflow at all (HTTP 422 on POST /dispatches). There is no
+# per-workflow way to grant workflow-write.
+#
+# Instead, this repo's default workflow permission is set to 'Read and write'
+# via Settings → Actions → General → Workflow permissions. Because we set
+# nothing here, the workflow inherits that repo-level setting, which gives
+# GITHUB_TOKEN the scope to push modified workflow files (e.g. autotag.yml)
+# that upstream merges in. Verified: run #28275345823 succeeded at the
+# checkout step but failed at push until the repo-level setting was right.
+#
+# If you ever want to lock down other workflows in this repo, do it at the
+# repo level (Settings → Actions → General) and leave individual workflow
+# files alone — that gives least-privilege by default without breaking
+# sync-style workflows that legitimately need workflow-write.
 
 jobs:
   sync:
