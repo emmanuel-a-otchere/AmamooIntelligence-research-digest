@@ -43,7 +43,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN does NOT include the `workflow` scope, so it cannot
+          # push modified .github/workflows/* files (GitHub Actions security
+          # boundary — see community discussion #26583). Use a PAT stored in
+          # the SYNC_TOKEN repo secret, which has the `workflow` scope.
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Configure git
         run: |
