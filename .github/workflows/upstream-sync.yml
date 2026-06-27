@@ -19,6 +19,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Required so the sync can push upstream workflow files (e.g. autotag.yml,
+  # installer-integration.yml). Without this, GitHub blocks the push with
+  # "refusing to allow a GitHub App to create or update workflow ... without
+  # workflows permission". Single-maintainer fork, acceptable trade-off.
+  workflows: write
 
 jobs:
   sync:
