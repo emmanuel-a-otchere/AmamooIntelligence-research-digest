@@ -1,0 +1,62 @@
+name: Cleanup bot branches
+
+# Deletes `upstream-sync/*` bot branches once their associated PR is closed.
+# Triggered on PR close so the source branch is gone by the time the merge
+# commit's parents are written. Future weekly syncs get clean PRs without
+# leaving a trail of stale bot branches in the branch list.
+#
+# Why this exists:
+# - The Sync upstream workflow creates branches named upstream-sync/<7-char-sha>
+#   and opens a PR from each one.
+# - When the PR is merged via the GitHub UI, the merge commit references the
+#   source branch as a parent. GitHub restores the branch at merge time even
+#   if you deleted it earlier, so the only reliable cleanup is post-merge.
+# - Without this workflow, the branch list grows by one entry per sync.
+#
+# Safety properties:
+# - Only matches branches matching upstream-sync/* (whitelisted by prefix).
+# - Only runs on PR close (ignore everything else).
+# - Uses SYNC_TOKEN (workflow scope) so the delete can touch refs that
+#   GITHUB_TOKEN isn't allowed to.
+# - Skips the delete if the branch is the default branch (defense-in-depth:
+#   upstream-sync/* could never be the default, but check anyway).
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    # Only run for PRs whose head branch matches our bot prefix.
+    # github.event.pull_request.head.ref is the source branch name.
+    if: startsWith(github.event.pull_request.head.ref, 'upstream-sync/')
+    steps:
+      - name: Delete bot branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = context.payload.pull_request.head.ref;
+            const defaultBranch = context.repo.default_branch;
+            if (branch === defaultBranch) {
+              core.warning(`Refusing to delete default branch ${branch}`);
+              return;
+            }
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `heads/${branch}`,
+              });
+              core.info(`Deleted branch ${branch}`);
+            } catch (err) {
+              // 422 means the branch is already gone (e.g. user deleted it
+              // manually after merge). Treat as success.
+              if (err.status === 422 || err.status === 404) {
+                core.info(`Branch ${branch} already gone (status ${err.status})`);
+                return;
+              }
+              throw err;
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYNC_TOKEN }}
